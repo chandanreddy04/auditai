@@ -144,6 +144,75 @@ def test_controls_testing_flow():
     assert resp.status_code == 200
 
 
+def test_workpaper_flow(monkeypatch):
+    from app.database.session import SessionLocal
+    from app.models.models import Client, Engagement, Workpaper
+    from app.web import routes as routes_module
+
+    monkeypatch.setattr(routes_module.workpaper_service, "draft_workpaper_narrative", lambda summary: "This is a drafted memo.")
+
+    client.post("/clients", data={"name": "Workpaper Test Corp"}, follow_redirects=False)
+    db = SessionLocal()
+    acme = db.query(Client).filter(Client.name == "Workpaper Test Corp").first()
+    db.close()
+
+    client.post(
+        f"/clients/{acme.id}/engagements",
+        data={"name": "Workpaper Engagement", "audit_type": "financial"},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    engagement = db.query(Engagement).filter(Engagement.client_id == acme.id).first()
+    db.close()
+
+    # First visit auto-creates an empty draft workpaper.
+    resp = client.get(f"/engagements/{engagement.id}/workpaper")
+    assert resp.status_code == 200
+    assert "draft" in resp.text.lower()
+
+    # Cannot finalize an empty draft.
+    resp = client.post(f"/engagements/{engagement.id}/workpaper/finalize", data={"finalized_by": "Test Auditor"})
+    assert resp.status_code == 400
+
+    # Generate (LLM call mocked above) -> draft content appears.
+    resp = client.post(f"/engagements/{engagement.id}/workpaper/generate", follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = client.get(f"/engagements/{engagement.id}/workpaper")
+    assert "This is a drafted memo." in resp.text
+
+    # Human edits are saved.
+    resp = client.post(
+        f"/engagements/{engagement.id}/workpaper/save",
+        data={"content": "This is a drafted memo, edited by a human."},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    resp = client.get(f"/engagements/{engagement.id}/workpaper")
+    assert "edited by a human" in resp.text
+
+    # Finalize locks it.
+    resp = client.post(
+        f"/engagements/{engagement.id}/workpaper/finalize",
+        data={"finalized_by": "Test Auditor"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    wp = db.query(Workpaper).filter(Workpaper.engagement_id == engagement.id).first()
+    db.close()
+    assert wp.status.value == "finalized"
+    assert wp.finalized_by == "Test Auditor"
+
+    # A finalized workpaper refuses further edits and regeneration.
+    resp = client.post(f"/engagements/{engagement.id}/workpaper/save", data={"content": "should not apply"})
+    assert resp.status_code == 400
+    resp = client.post(f"/engagements/{engagement.id}/workpaper/generate")
+    assert resp.status_code == 400
+
+
 def test_missing_engagement_is_404():
     resp = client.get("/engagements/999999")
     assert resp.status_code == 404

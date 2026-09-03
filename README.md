@@ -16,8 +16,8 @@ adding the next.
 ```
 Phase 1: document intake  →  AI extraction  →  reconciliation  →  exception detection  →  human review   [done]
 Phase 2: controls testing (policy rules tested against the same evidence)                                [done]
-Phase 3: workpaper drafting                                                                               [next]
-Phase 4: PBC / request tracking
+Phase 3: workpaper drafting                                                                               [done]
+Phase 4: PBC / request tracking                                                                           [next]
 Phase 5: multi-agent orchestration across all of the above
 ```
 
@@ -77,8 +77,22 @@ chain to a PO"), controls testing is policy-driven and threshold-gated
 evidence can pass one and fail the other, or vice versa, and both are
 tracked separately.
 
-Both phases share: an append-only audit log of every agent action and
-every human decision, and a human review queue where nothing auto-closes.
+**Phase 3 — workpaper drafting.** A deterministic summary builder
+([`workpaper_service.py`](app/services/workpaper_service.py)) gathers
+everything already decided in Phases 1 and 2 for an engagement —
+document/evidence counts, every reconciliation exception and how it
+was resolved, every control result and its resolution note — into a
+structured summary. An LLM is then handed *only* that summary, never
+raw evidence, and asked to write it up as a short professional memo.
+The draft is fully editable by a human before finalizing; finalizing
+is the one irreversible action in this phase and is logged like every
+other consequential action. Live-tested this generates an accurate,
+fact-checkable memo — every number and finding in the draft traced
+back to a real row in the database, nothing invented.
+
+All three phases share: an append-only audit log of every agent action
+and every human decision, and a human review queue where nothing
+auto-closes on its own.
 
 ## Known limitations (found via live testing, not yet fixed)
 
@@ -105,6 +119,10 @@ every human decision, and a human review queue where nothing auto-closes.
 - **Controls are defined per-engagement, not as a reusable client
   policy library.** A control an auditor defines on one engagement
   doesn't carry over to next year's engagement for the same client yet.
+- **One workpaper draft per engagement, no version history.** Every
+  "Generate draft" overwrites the current draft's content (only ever a
+  concern before finalizing - finalized workpapers are locked). A real
+  version history is a natural improvement, not built yet.
 
 ## Running it locally
 
@@ -130,19 +148,23 @@ this stack.
 pytest
 ```
 
-`test_reconciliation_service.py` and `test_controls_testing_service.py`
-cover the two decision engines with zero LLM calls — pure input/output,
+`test_reconciliation_service.py`, `test_controls_testing_service.py`,
+and the summary-building half of `test_workpaper_service.py` cover the
+three decision/summary engines with zero LLM calls — pure input/output,
 deterministic, fast. `test_api.py` exercises the full route flow
-(clients, engagements, uploads, exceptions, controls) end to end
-against a throwaway SQLite database. `test_evidence_extraction_service.py`
-covers the extraction service's schema handling, normalization, and
-failure path with the LLM call mocked.
+(clients, engagements, uploads, exceptions, controls, workpaper
+generate/edit/finalize) end to end against a throwaway SQLite database.
+`test_evidence_extraction_service.py` and the drafting half of
+`test_workpaper_service.py` cover LLM-touching code with the model call
+mocked.
 
 Every feature here has also been verified **live**, not just against
 mocks: a real local model (phi3.5 via Ollama), a real running server,
 real generated PDFs uploaded through the actual routes and browser UI.
-Two real extraction bugs were found and fixed this way (see git log) —
-mocked tests alone would not have caught either.
+Two real extraction bugs, and one prompt-formatting issue in the
+workpaper drafter (unwanted letter-style headers/signature blocks),
+were found and fixed this way (see git log) — mocked tests alone would
+not have caught any of them.
 
 ## Project layout
 
@@ -151,7 +173,7 @@ app/
   core/config.py                     settings, one seam for the environment
   models/models.py                   Client, Engagement, Document, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
-                                      AuditLogEntry
+                                      Workpaper, AuditLogEntry
   database/session.py                engine, session factory, get_db()
   schemas/extraction.py              the schema the LLM's output is constrained to
   services/
@@ -160,6 +182,7 @@ app/
     evidence_extraction_service.py   LLM: document text -> structured evidence
     reconciliation_service.py        deterministic: Phase 1's decision engine
     controls_testing_service.py      deterministic: Phase 2's decision engine
+    workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
     audit_log_service.py             one function, called after every action
   web/routes.py                      the whole app, wired together
 tests/

@@ -21,10 +21,11 @@ from app.database.session import get_db
 from app.models.models import (
     Client, Control, ControlRuleType, ControlTestResult, ControlTestStatus,
     Document, DocumentStatus, DocumentType, Engagement, EngagementStatus,
-    EvidenceRecord, ExceptionStatus, ReconciliationException,
+    EvidenceRecord, ExceptionStatus, ReconciliationException, Workpaper, WorkpaperStatus,
 )
 from app.services import audit_log_service
 from app.services import controls_testing_service as controls_svc
+from app.services import workpaper_service
 from app.services.evidence_extraction_service import extract_evidence
 from app.services.llm_client import LLMUnavailableError
 from app.services.pdf_text_service import extract_text, has_extractable_text
@@ -432,6 +433,103 @@ def resolve_control_result(
         engagement_id=result.engagement_id, client_id=result.client_id,
     )
     return RedirectResponse(url=f"/engagements/{result.engagement_id}/controls", status_code=303)
+
+
+# --------------------------------------------------------------- workpaper
+
+def _get_or_create_workpaper(db: Session, engagement: Engagement) -> Workpaper:
+    wp = db.query(Workpaper).filter(Workpaper.engagement_id == engagement.id).first()
+    if wp is None:
+        wp = Workpaper(engagement_id=engagement.id, client_id=engagement.client_id, status=WorkpaperStatus.DRAFT)
+        db.add(wp)
+        db.commit()
+    return wp
+
+
+@router.get("/engagements/{engagement_id}/workpaper")
+def workpaper_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+    engagement = _get_engagement_or_404(db, engagement_id)
+    wp = _get_or_create_workpaper(db, engagement)
+    return templates.TemplateResponse("workpaper.html", {"request": request, "engagement": engagement, "wp": wp})
+
+
+@router.post("/engagements/{engagement_id}/workpaper/generate")
+def generate_workpaper(engagement_id: int, db: Session = Depends(get_db)):
+    """The one LLM call in this phase: build the deterministic summary
+    of everything decided so far, then ask the model to write it up.
+    Refuses to overwrite a finalized workpaper - regenerating means
+    starting a new draft, which this phase deliberately doesn't offer
+    yet (see README's Known Limitations)."""
+    from datetime import datetime, timezone
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    wp = _get_or_create_workpaper(db, engagement)
+    if wp.status == WorkpaperStatus.FINALIZED:
+        raise HTTPException(400, "This workpaper is finalized and cannot be regenerated.")
+
+    summary = workpaper_service.build_engagement_summary(db, engagement)
+    try:
+        draft = workpaper_service.draft_workpaper_narrative(summary)
+    except LLMUnavailableError as e:
+        audit_log_service.log(
+            db, actor="workpaper_service", action="workpaper_draft_failed", detail=str(e),
+            engagement_id=engagement_id, client_id=engagement.client_id,
+        )
+        raise HTTPException(503, f"AI drafting unavailable: {e}")
+
+    wp.content = draft
+    wp.generated_at = datetime.now(timezone.utc)
+    wp.updated_at = wp.generated_at
+    db.commit()
+
+    audit_log_service.log(
+        db, actor="workpaper_service", action="workpaper_drafted",
+        detail=f"{summary.documents_total} documents, {summary.exceptions_total} exceptions, "
+               f"{len(summary.control_findings)} control results summarized",
+        engagement_id=engagement_id, client_id=engagement.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{engagement_id}/workpaper", status_code=303)
+
+
+@router.post("/engagements/{engagement_id}/workpaper/save")
+def save_workpaper(engagement_id: int, content: str = Form(...), db: Session = Depends(get_db)):
+    from datetime import datetime, timezone
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    wp = _get_or_create_workpaper(db, engagement)
+    if wp.status == WorkpaperStatus.FINALIZED:
+        raise HTTPException(400, "This workpaper is finalized and cannot be edited.")
+
+    wp.content = content
+    wp.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor="human", action="workpaper_edited", detail=f"{len(content)} characters",
+        engagement_id=engagement_id, client_id=engagement.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{engagement_id}/workpaper", status_code=303)
+
+
+@router.post("/engagements/{engagement_id}/workpaper/finalize")
+def finalize_workpaper(engagement_id: int, finalized_by: str = Form(...), db: Session = Depends(get_db)):
+    from datetime import datetime, timezone
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    wp = _get_or_create_workpaper(db, engagement)
+    if not wp.content:
+        raise HTTPException(400, "Cannot finalize an empty workpaper - generate or write a draft first.")
+
+    wp.status = WorkpaperStatus.FINALIZED
+    wp.finalized_by = finalized_by.strip()
+    wp.finalized_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=finalized_by.strip(), action="workpaper_finalized", detail="",
+        engagement_id=engagement_id, client_id=engagement.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{engagement_id}/workpaper", status_code=303)
 
 
 # -------------------------------------------------------------- audit log

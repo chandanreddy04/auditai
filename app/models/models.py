@@ -217,6 +217,33 @@ class ControlTestResult(Base):
     control = relationship("Control", back_populates="test_results")
 
 
+class WorkpaperStatus(str, enum.Enum):
+    DRAFT = "draft"
+    FINALIZED = "finalized"
+
+
+class Workpaper(Base):
+    """Phase 3. One draft summary memo per engagement - the write-up an
+    auditor would otherwise type from scratch by re-reading every
+    document, exception, and control result. workpaper_service.py
+    builds the actual facts deterministically (counts, statuses,
+    resolution notes already on file); the LLM only turns that into
+    readable prose. A human can freely edit the draft before finalizing
+    it, and finalizing - the one irreversible step - is a named human
+    action, logged like every other consequential action in this app."""
+    __tablename__ = "workpapers"
+
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, unique=True, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    content = Column(Text, nullable=True)
+    status = Column(Enum(WorkpaperStatus), default=WorkpaperStatus.DRAFT)
+    generated_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+    finalized_by = Column(String(200), nullable=True)
+    finalized_at = Column(DateTime, nullable=True)
+
+
 class AuditLogEntry(Base):
     """Append-only. Every agent action and every human decision writes
     one row here - who/what did it, on what evidence, when. Nothing

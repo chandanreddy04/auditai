@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Workpaper - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Workpaper</p>
+<h1>Workpaper draft</h1>
+<p class="subtle">
+    Drafted by AI from the facts already decided by reconciliation and controls testing below - the model never
+    sees raw evidence and never decides anything, it only writes up what's already on file. A human edits and
+    finalizes it; finalizing is the one irreversible step here.
+</p>
+
+<p>
+    <span class="badge {{ 'badge-extracted' if wp.status.value == 'finalized' else '' }}">{{ wp.status.value }}</span>
+    {% if wp.generated_at %}<span class="subtle small">last generated {{ wp.generated_at.strftime("%Y-%m-%d %H:%M") }}</span>{% endif %}
+    {% if wp.finalized_by %}<span class="subtle small">- finalized by {{ wp.finalized_by }} on {{ wp.finalized_at.strftime("%Y-%m-%d %H:%M") }}</span>{% endif %}
+</p>
+
+{% if wp.status.value == "finalized" %}
+    <div class="exception-card severity-low">
+        <p style="white-space: pre-wrap;">{{ wp.content }}</p>
+    </div>
+{% else %}
+    <form method="post" action="/engagements/{{ engagement.id }}/workpaper/generate" class="inline-form">
+        <button type="submit">{{ "Regenerate draft" if wp.content else "Generate draft" }}</button>
+        <span class="subtle small">Runs the AI drafting step again from the current facts - overwrites unsaved edits below.</span>
+    </form>
+
+    <form method="post" action="/engagements/{{ engagement.id }}/workpaper/save">
+        <textarea name="content" rows="16" style="width:100%; font-family: inherit; font-size: 14px; padding: 10px; border: 1px solid var(--line); border-radius: 6px;" placeholder="Generate a draft above, or write one here by hand.">{{ wp.content or "" }}</textarea>
+        <p><button type="submit">Save edits</button></p>
+    </form>
+
+    <h3>Finalize</h3>
+    <p class="subtle small">Locks the draft above as-is. This cannot be undone in this version of the app.</p>
+    <form method="post" action="/engagements/{{ engagement.id }}/workpaper/finalize" class="inline-form">
+        <input type="text" name="finalized_by" placeholder="Your name" required>
+        <button type="submit" {{ "disabled" if not wp.content else "" }}>Finalize workpaper</button>
+    </form>
+{% endif %}
+{% endblock %}
