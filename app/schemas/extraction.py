@@ -40,3 +40,8 @@ class LLMExtractedEvidence(BaseModel):
     amount: float | None = Field(description="The total amount on the document")
     currency: str = Field(description="3-letter ISO currency code, e.g. USD")
     record_date: str | None = Field(description="ISO format YYYY-MM-DD")
+    approver_name: str | None = Field(
+        description="The name of the person who approved/authorized this document, if the "
+                    "document shows one - e.g. next to 'Approved by:', 'Authorized by:', or "
+                    "a signature line. Null if no approval evidence appears anywhere.",
+    )

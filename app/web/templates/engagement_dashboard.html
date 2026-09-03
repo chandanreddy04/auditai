@@ -10,10 +10,14 @@
     <div class="stat {{ 'stat-alert' if open_exceptions else '' }}">
         <span class="stat-num">{{ open_exceptions }}</span><span class="stat-label">open exceptions</span>
     </div>
+    <div class="stat {{ 'stat-alert' if open_control_failures else '' }}">
+        <span class="stat-num">{{ open_control_failures }}</span><span class="stat-label">open control failures</span>
+    </div>
 </div>
 
 <p>
     <a href="/engagements/{{ engagement.id }}/exceptions" class="button">Review exceptions &rarr;</a>
+    <a href="/engagements/{{ engagement.id }}/controls" class="button secondary">Controls testing &rarr;</a>
     <a href="/engagements/{{ engagement.id }}/audit-log" class="button secondary">View audit log &rarr;</a>
 </p>
 

@@ -19,10 +19,12 @@ from sqlalchemy.orm import Session
 from app.core.config import UPLOAD_DIR
 from app.database.session import get_db
 from app.models.models import (
-    Client, Document, DocumentStatus, DocumentType, Engagement,
-    EngagementStatus, EvidenceRecord, ExceptionStatus, ReconciliationException,
+    Client, Control, ControlRuleType, ControlTestResult, ControlTestStatus,
+    Document, DocumentStatus, DocumentType, Engagement, EngagementStatus,
+    EvidenceRecord, ExceptionStatus, ReconciliationException,
 )
 from app.services import audit_log_service
+from app.services import controls_testing_service as controls_svc
 from app.services.evidence_extraction_service import extract_evidence
 from app.services.llm_client import LLMUnavailableError
 from app.services.pdf_text_service import extract_text, has_extractable_text
@@ -98,12 +100,18 @@ def engagement_dashboard(request: Request, engagement_id: int, db: Session = Dep
         .filter(ReconciliationException.engagement_id == engagement_id, ReconciliationException.status == ExceptionStatus.OPEN)
         .count()
     )
+    open_control_failures = (
+        db.query(ControlTestResult)
+        .filter(ControlTestResult.engagement_id == engagement_id, ControlTestResult.status == ExceptionStatus.OPEN)
+        .count()
+    )
     evidence_count = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement_id).count()
     return templates.TemplateResponse(
         "engagement_dashboard.html",
         {
             "request": request, "engagement": engagement, "documents": documents,
-            "open_exceptions": open_exceptions, "evidence_count": evidence_count,
+            "open_exceptions": open_exceptions, "open_control_failures": open_control_failures,
+            "evidence_count": evidence_count,
         },
     )
 
@@ -186,6 +194,7 @@ def _extract_and_reconcile(db: Session, document: Document, engagement: Engageme
         doc_type=doc_type, vendor_name=extracted.vendor_name,
         reference_number=extracted.reference_number, related_reference_number=extracted.related_reference_number,
         amount=extracted.amount, currency=extracted.currency, record_date=extracted.record_date,
+        approver_name=extracted.approver_name,
     )
     db.add(record)
     db.commit()
@@ -197,6 +206,7 @@ def _extract_and_reconcile(db: Session, document: Document, engagement: Engageme
     )
 
     _run_and_persist_reconciliation(db, engagement)
+    _run_and_persist_controls_testing(db, engagement)
 
 
 def _run_and_persist_reconciliation(db: Session, engagement: Engagement) -> None:
@@ -240,6 +250,63 @@ def _run_and_persist_reconciliation(db: Session, engagement: Engagement) -> None
     audit_log_service.log(
         db, actor="reconciliation_engine", action="reconciliation_run",
         detail=f"{len(results)} exceptions found, {new_count} new",
+        engagement_id=engagement.id, client_id=engagement.client_id,
+    )
+
+
+def _run_and_persist_controls_testing(db: Session, engagement: Engagement) -> None:
+    """Phase 2, same re-run-everything-every-time approach as
+    reconciliation above: test every active control against every
+    evidence record in the engagement. A PASS is written RESOLVED
+    immediately - nothing for a human to review, the evidence already
+    satisfies the control. A FAIL is only written OPEN the first time;
+    once a human has resolved or dismissed a given (control, evidence
+    record) failure, re-running never reopens or duplicates it."""
+    active_controls = db.query(Control).filter(Control.engagement_id == engagement.id, Control.active == "active").all()
+    if not active_controls:
+        return
+
+    records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
+    control_like = [
+        controls_svc.ControlLike(id=c.id, rule_type=c.rule_type, threshold_amount=c.threshold_amount)
+        for c in active_controls
+    ]
+    evidence_like = [
+        controls_svc.EvidenceLike(
+            id=r.id, doc_type=r.doc_type, reference_number=r.reference_number,
+            related_reference_number=r.related_reference_number, amount=r.amount, approver_name=r.approver_name,
+        )
+        for r in records
+    ]
+    results = controls_svc.run_controls_testing(control_like, evidence_like)
+
+    existing = (
+        db.query(ControlTestResult)
+        .filter(ControlTestResult.engagement_id == engagement.id)
+        .all()
+    )
+    existing_keys = {(e.control_id, e.evidence_record_id) for e in existing}
+
+    new_pass, new_fail = 0, 0
+    for result in results:
+        key = (result.control_id, result.evidence_record_id)
+        if key in existing_keys:
+            continue
+        is_pass = result.result == "pass"
+        db.add(ControlTestResult(
+            control_id=result.control_id, engagement_id=engagement.id, client_id=engagement.client_id,
+            evidence_record_id=result.evidence_record_id, result=ControlTestStatus(result.result), detail=result.detail,
+            status=ExceptionStatus.RESOLVED if is_pass else ExceptionStatus.OPEN,
+            resolved_by="controls_testing_engine" if is_pass else None,
+            resolution_note="Passed automatically - evidence satisfies the control." if is_pass else None,
+        ))
+        new_pass += 1 if is_pass else 0
+        new_fail += 0 if is_pass else 1
+    db.commit()
+
+    audit_log_service.log(
+        db, actor="controls_testing_engine", action="controls_testing_run",
+        detail=f"{len(results)} results ({new_pass} new pass, {new_fail} new fail)",
         engagement_id=engagement.id, client_id=engagement.client_id,
     )
 
@@ -290,6 +357,81 @@ def resolve_exception(
         engagement_id=exc.engagement_id, client_id=exc.client_id,
     )
     return RedirectResponse(url=f"/engagements/{exc.engagement_id}/exceptions", status_code=303)
+
+
+# ----------------------------------------------------------------- controls
+
+@router.get("/engagements/{engagement_id}/controls")
+def controls_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+    engagement = _get_engagement_or_404(db, engagement_id)
+    controls = db.query(Control).filter(Control.engagement_id == engagement_id).order_by(Control.created_at).all()
+
+    open_results = (
+        db.query(ControlTestResult)
+        .filter(ControlTestResult.engagement_id == engagement_id, ControlTestResult.status == ExceptionStatus.OPEN)
+        .order_by(ControlTestResult.tested_at)
+        .all()
+    )
+    closed_results = (
+        db.query(ControlTestResult)
+        .filter(ControlTestResult.engagement_id == engagement_id, ControlTestResult.status != ExceptionStatus.OPEN)
+        .order_by(ControlTestResult.tested_at.desc())
+        .limit(30)
+        .all()
+    )
+    return templates.TemplateResponse(
+        "controls.html",
+        {
+            "request": request, "engagement": engagement, "controls": controls,
+            "open_results": open_results, "closed_results": closed_results,
+            "rule_types": [t.value for t in ControlRuleType],
+        },
+    )
+
+
+@router.post("/engagements/{engagement_id}/controls")
+def create_control(
+    engagement_id: int, name: str = Form(...), rule_type: str = Form(...),
+    threshold_amount: float = Form(0.0), db: Session = Depends(get_db),
+):
+    engagement = _get_engagement_or_404(db, engagement_id)
+    control = Control(
+        engagement_id=engagement_id, client_id=engagement.client_id,
+        name=name.strip(), rule_type=ControlRuleType(rule_type), threshold_amount=threshold_amount,
+    )
+    db.add(control)
+    db.commit()
+    audit_log_service.log(
+        db, actor="human", action="control_defined",
+        detail=f"{control.name} ({control.rule_type.value}, threshold={control.threshold_amount:,.2f})",
+        engagement_id=engagement_id, client_id=engagement.client_id,
+    )
+    _run_and_persist_controls_testing(db, engagement)
+    return RedirectResponse(url=f"/engagements/{engagement_id}/controls", status_code=303)
+
+
+@router.post("/control-results/{result_id}/resolve")
+def resolve_control_result(
+    result_id: int, resolved_by: str = Form(...), resolution_note: str = Form(""),
+    action: str = Form("resolved"), db: Session = Depends(get_db),
+):
+    result = db.get(ControlTestResult, result_id)
+    if result is None:
+        raise HTTPException(404, "Control test result not found")
+
+    from datetime import datetime, timezone
+    result.status = ExceptionStatus.RESOLVED if action == "resolved" else ExceptionStatus.DISMISSED
+    result.resolved_by = resolved_by.strip()
+    result.resolution_note = resolution_note.strip()
+    result.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=resolved_by.strip(), action=f"control_result_{result.status.value}",
+        detail=f"#{result.id}: {resolution_note.strip()}",
+        engagement_id=result.engagement_id, client_id=result.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{result.engagement_id}/controls", status_code=303)
 
 
 # -------------------------------------------------------------- audit log

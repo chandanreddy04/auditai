@@ -116,6 +116,7 @@ class EvidenceRecord(Base):
     amount = Column(Float, nullable=True)
     currency = Column(String(10), default="USD")
     record_date = Column(String(20), nullable=True)  # ISO date string, as extracted
+    approver_name = Column(String(200), nullable=True)  # who signed off, if the document shows one - feeds controls_testing_service
     extracted_at = Column(DateTime, default=_now)
 
     document = relationship("Document", back_populates="evidence_records")
@@ -155,6 +156,65 @@ class ReconciliationException(Base):
     resolution_note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_now)
     resolved_at = Column(DateTime, nullable=True)
+
+
+class ControlRuleType(str, enum.Enum):
+    """Phase 2. Each value corresponds to one deterministic check
+    controls_testing_service.py knows how to run - adding a new kind
+    of control means adding a new value here AND a new branch in that
+    service, never just typing a new string into a form."""
+    PO_REQUIRED_ABOVE_THRESHOLD = "po_required_above_threshold"
+    APPROVAL_REQUIRED_ABOVE_THRESHOLD = "approval_required_above_threshold"
+
+
+class Control(Base):
+    """One internal control the auditor has decided to test this
+    engagement against - e.g. "invoices over $1,000 require a PO" or
+    "payments over $5,000 require documented approval". Defined by a
+    human (a real control-testing agent would still have a human
+    approve the control library, per the blueprint's own permission
+    matrix), tested by plain code, never by an LLM."""
+    __tablename__ = "controls"
+
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    rule_type = Column(Enum(ControlRuleType), nullable=False)
+    threshold_amount = Column(Float, nullable=False, default=0.0)
+    active = Column(String(10), default="active")  # "active" / "inactive" - kept a plain string, no need for a real enum yet
+    created_at = Column(DateTime, default=_now)
+
+    test_results = relationship("ControlTestResult", back_populates="control", cascade="all, delete-orphan")
+
+
+class ControlTestStatus(str, enum.Enum):
+    PASS = "pass"
+    FAIL = "fail"
+
+
+class ControlTestResult(Base):
+    """One control checked against one evidence record. A PASS is
+    logged and auto-closed immediately (nothing for a human to review -
+    the evidence already satisfies the control); a FAIL starts OPEN and
+    sits in the same kind of review queue as a ReconciliationException,
+    closed only by a named human, same discipline throughout this app."""
+    __tablename__ = "control_test_results"
+
+    id = Column(Integer, primary_key=True)
+    control_id = Column(Integer, ForeignKey("controls.id"), nullable=False, index=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    evidence_record_id = Column(Integer, ForeignKey("evidence_records.id"), nullable=False, index=True)
+    result = Column(Enum(ControlTestStatus), nullable=False)
+    detail = Column(Text, nullable=False)
+    status = Column(Enum(ExceptionStatus), default=ExceptionStatus.OPEN)  # OPEN only meaningful for a FAIL; a PASS is written RESOLVED immediately
+    resolved_by = Column(String(200), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    tested_at = Column(DateTime, default=_now)
+    resolved_at = Column(DateTime, nullable=True)
+
+    control = relationship("Control", back_populates="test_results")
 
 
 class AuditLogEntry(Base):

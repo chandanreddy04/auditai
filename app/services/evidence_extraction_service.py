@@ -42,7 +42,11 @@ SYSTEM_PROMPT = (
     "Do not confuse the two.\n\n"
     "currency is a 3-letter ISO code (USD, EUR, GBP, ...). If no "
     "currency is stated anywhere but a dollar amount ($) appears, use "
-    "'USD' - never write the word 'unknown' into this field."
+    "'USD' - never write the word 'unknown' into this field.\n\n"
+    "approver_name is the name of whoever approved/authorized/signed "
+    "this document - look for 'Approved by:', 'Authorized by:', "
+    "'Signed:', or a signature block with a name under it. Leave it "
+    "null if the document shows no approval or signature at all."
 )
 
 # Small models are reliable at reading the right words off the page but

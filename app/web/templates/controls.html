@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Controls - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Controls</p>
+<h1>Controls testing</h1>
+<p class="subtle">Every control below is tested by plain rule-based comparison against the evidence, not by the AI. A PASS closes itself automatically; a FAIL waits here until a human reviews it.</p>
+
+<h2>Controls defined ({{ controls|length }})</h2>
+<table class="list">
+    <thead><tr><th>Control</th><th>Rule</th><th>Threshold</th></tr></thead>
+    <tbody>
+    {% for c in controls %}
+        <tr>
+            <td>{{ c.name }}</td>
+            <td><span class="badge">{{ c.rule_type.value }}</span></td>
+            <td>{{ "%.2f"|format(c.threshold_amount) }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="3" class="empty">No controls defined yet - add one below.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<h3>Define a control</h3>
+<form method="post" action="/engagements/{{ engagement.id }}/controls" class="inline-form">
+    <input type="text" name="name" placeholder="e.g. POs required over $1,000" required>
+    <select name="rule_type">
+        {% for t in rule_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+    </select>
+    <input type="number" step="0.01" name="threshold_amount" placeholder="Threshold amount" value="0" required>
+    <button type="submit">Add control</button>
+</form>
+
+<h2>Open findings ({{ open_results|length }})</h2>
+{% for r in open_results %}
+<div class="exception-card severity-high">
+    <div class="exception-head">
+        <span class="badge">{{ r.control.name }}</span>
+        <span class="badge severity-badge">fail</span>
+    </div>
+    <p>{{ r.detail }}</p>
+    <form method="post" action="/control-results/{{ r.id }}/resolve" class="inline-form">
+        <input type="text" name="resolved_by" placeholder="Your name" required>
+        <input type="text" name="resolution_note" placeholder="Resolution note (what did you find?)">
+        <button type="submit" name="action" value="resolved">Resolve</button>
+        <button type="submit" name="action" value="dismissed" class="secondary">Dismiss (false positive)</button>
+    </form>
+</div>
+{% else %}
+<p class="empty">No open control findings - everything tested passes so far.</p>
+{% endfor %}
+
+<h2>Recently closed</h2>
+<table class="list">
+    <thead><tr><th>Control</th><th>Result</th><th>Detail</th><th>Closed by</th></tr></thead>
+    <tbody>
+    {% for r in closed_results %}
+        <tr>
+            <td>{{ r.control.name }}</td>
+            <td><span class="badge {{ 'badge-extracted' if r.result.value == 'pass' else '' }}">{{ r.result.value }}</span></td>
+            <td>{{ r.detail }}</td>
+            <td>{{ r.resolved_by }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing tested yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

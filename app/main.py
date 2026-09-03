@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="AuditAI - Phase 1", lifespan=lifespan)
+app = FastAPI(title="AuditAI", lifespan=lifespan)
 app.include_router(router)
 
 static_dir = Path(__file__).parent / "web" / "static"

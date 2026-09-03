@@ -10,6 +10,7 @@ def test_extract_evidence_success(monkeypatch):
     payload = {
         "doc_type": "invoice", "vendor_name": "Acme Supplies", "reference_number": "INV-42",
         "related_reference_number": "PO-9", "amount": 250.0, "currency": "USD", "record_date": "2026-01-15",
+        "approver_name": None,
     }
     monkeypatch.setattr(svc, "chat", lambda **kwargs: json.dumps(payload))
 
@@ -70,7 +71,7 @@ def test_extract_evidence_normalizes_doc_type_and_currency_from_raw_llm_output(m
     payload = {
         "doc_type": "Purchase Order", "vendor_name": "Northwind Office Supplies",
         "reference_number": "PO-100", "related_reference_number": None,
-        "amount": 5000.0, "currency": "unknown", "record_date": "2026-08-01",
+        "amount": 5000.0, "currency": "unknown", "record_date": "2026-08-01", "approver_name": None,
     }
     monkeypatch.setattr(svc, "chat", lambda **kwargs: json.dumps(payload))
 
