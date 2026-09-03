@@ -281,6 +281,69 @@ class PBCRequest(Base):
     linked_document = relationship("Document")
 
 
+class OrchestrationTrigger(str, enum.Enum):
+    DOCUMENT_UPLOAD = "document_upload"
+    MANUAL = "manual"
+
+
+class OrchestrationRunStatus(str, enum.Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class OrchestrationStepStatus(str, enum.Enum):
+    SUCCESS = "success"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+class OrchestrationRun(Base):
+    """Phase 5. Every agent this run coordinates already existed and
+    already made its own deterministic or narrow-LLM decisions in
+    Phases 1-2 - an OrchestrationRun adds no new judgment of its own.
+    What it adds is the thing a diagram of "Human Auditor -> Orchestrator
+    -> testing agents -> Human Review" can't give you by itself: a
+    persisted, inspectable record that the right agents actually ran,
+    in the right order, with a real result, every single time - not
+    just an implicit sequence of function calls buried in a route
+    handler. This app has no background job queue, so a run is always
+    synchronous start-to-finish within one request; there is no
+    "in progress" status to represent."""
+    __tablename__ = "orchestration_runs"
+
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    trigger = Column(Enum(OrchestrationTrigger), nullable=False)
+    triggered_by = Column(String(300), nullable=True)  # a filename (upload) or a human's name (manual)
+    status = Column(Enum(OrchestrationRunStatus), nullable=False)
+    started_at = Column(DateTime, default=_now)
+    completed_at = Column(DateTime, nullable=True)
+
+    steps = relationship("OrchestrationStep", back_populates="run", cascade="all, delete-orphan", order_by="OrchestrationStep.step_order")
+
+
+class OrchestrationStep(Base):
+    """One agent's turn within one OrchestrationRun. A step is SKIPPED,
+    not silently absent, when an earlier step in the same run failed or
+    found nothing for it to do - the full intended pipeline is always
+    visible in the record, never just the steps that happened to run."""
+    __tablename__ = "orchestration_steps"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, ForeignKey("orchestration_runs.id"), nullable=False, index=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    step_order = Column(Integer, nullable=False)
+    agent_name = Column(String(100), nullable=False)  # e.g. "evidence_extraction_agent", "reconciliation_agent"
+    status = Column(Enum(OrchestrationStepStatus), nullable=False)
+    detail = Column(Text, nullable=True)
+    started_at = Column(DateTime, default=_now)
+    completed_at = Column(DateTime, nullable=True)
+
+    run = relationship("OrchestrationRun", back_populates="steps")
+
+
 class AuditLogEntry(Base):
     """Append-only. Every agent action and every human decision writes
     one row here - who/what did it, on what evidence, when. Nothing

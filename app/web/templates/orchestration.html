@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Orchestration - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Orchestration</p>
+<h1>Orchestration history</h1>
+<p class="subtle">
+    Every agent run, in order, with its result - document uploads trigger this automatically
+    (Evidence Extraction &rarr; Reconciliation &rarr; Controls Testing); the button below re-runs
+    Reconciliation &rarr; Controls Testing on demand, without a new upload. Nothing here makes a new
+    decision - it only coordinates the same agents from Phases 1-2 and writes down that it did.
+</p>
+
+<form method="post" action="/engagements/{{ engagement.id }}/run-full-check" class="inline-form">
+    <input type="text" name="triggered_by" placeholder="Your name" required>
+    <button type="submit">Run full check now</button>
+</form>
+
+{% for run in runs %}
+<div class="exception-card severity-{{ 'high' if run.status.value == 'failed' else 'low' }}">
+    <div class="exception-head">
+        <span class="badge">{{ run.trigger.value }}</span>
+        <span class="badge {{ 'badge-extracted' if run.status.value == 'completed' else 'badge-failed' }}">{{ run.status.value }}</span>
+        <span class="subtle small">{{ run.started_at.strftime("%Y-%m-%d %H:%M:%S") }}{% if run.triggered_by %} - {{ run.triggered_by }}{% endif %}</span>
+    </div>
+    <table class="list">
+        <thead><tr><th>#</th><th>Agent</th><th>Result</th><th>Detail</th></tr></thead>
+        <tbody>
+        {% for step in run.steps %}
+            <tr>
+                <td>{{ step.step_order }}</td>
+                <td>{{ step.agent_name }}</td>
+                <td><span class="badge {{ 'badge-extracted' if step.status.value == 'success' else ('badge-failed' if step.status.value == 'failed' else '') }}">{{ step.status.value }}</span></td>
+                <td>{{ step.detail }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p class="empty">No orchestration runs yet - upload a document or run a full check above.</p>
+{% endfor %}
+{% endblock %}

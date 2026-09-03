@@ -299,6 +299,85 @@ def test_pbc_flow(monkeypatch):
     assert "Closed (2)" in resp.text
 
 
+def test_orchestration_flow(monkeypatch):
+    from app.database.session import SessionLocal
+    from app.models.models import Client, Engagement, OrchestrationRun
+    from app.schemas.extraction import LLMExtractedEvidence
+    from app.web import routes as routes_module
+
+    monkeypatch.setattr(
+        routes_module.orchestration_service, "extract_text",
+        lambda path: "INVOICE\nInvoice Number: INV-ORCH-1\nAmount: 100.00",
+    )
+    monkeypatch.setattr(
+        routes_module.orchestration_service, "extract_evidence",
+        lambda text: LLMExtractedEvidence(
+            doc_type="invoice", vendor_name="Acme", reference_number="INV-ORCH-1", related_reference_number=None,
+            amount=100.0, currency="USD", record_date="2026-01-01", approver_name=None,
+        ),
+    )
+
+    client.post("/clients", data={"name": "Orchestration Test Corp"}, follow_redirects=False)
+    db = SessionLocal()
+    acme = db.query(Client).filter(Client.name == "Orchestration Test Corp").first()
+    db.close()
+
+    client.post(
+        f"/clients/{acme.id}/engagements",
+        data={"name": "Orchestration Engagement", "audit_type": "financial"},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    engagement = db.query(Engagement).filter(Engagement.client_id == acme.id).first()
+    db.close()
+
+    resp = client.get(f"/engagements/{engagement.id}/orchestration")
+    assert resp.status_code == 200
+    assert "No orchestration runs yet" in resp.text
+
+    # Upload a document - the pipeline should run automatically (extraction mocked above).
+    resp = client.post(
+        f"/engagements/{engagement.id}/documents",
+        files={"file": ("orch_test.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    resp = client.get(f"/engagements/{engagement.id}/orchestration")
+    assert resp.status_code == 200
+    assert "document_upload" in resp.text
+    assert "evidence_extraction_agent" in resp.text
+    assert "reconciliation_agent" in resp.text
+    assert "controls_testing_agent" in resp.text
+
+    db = SessionLocal()
+    run = db.query(OrchestrationRun).filter(OrchestrationRun.engagement_id == engagement.id).first()
+    assert run is not None
+    assert run.trigger.value == "document_upload"
+    assert run.triggered_by == "orch_test.pdf"
+    assert len(run.steps) == 3
+    db.close()
+
+    # Manual full-check trigger.
+    resp = client.post(
+        f"/engagements/{engagement.id}/run-full-check",
+        data={"triggered_by": "Test Auditor"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    resp = client.get(f"/engagements/{engagement.id}/orchestration")
+    assert "manual" in resp.text
+    assert "Test Auditor" in resp.text
+
+    db = SessionLocal()
+    runs = db.query(OrchestrationRun).filter(OrchestrationRun.engagement_id == engagement.id).all()
+    assert len(runs) == 2
+    manual_run = [r for r in runs if r.trigger.value == "manual"][0]
+    assert len(manual_run.steps) == 2  # no extraction step for a manual re-check
+    db.close()
+
+
 def test_missing_engagement_is_404():
     resp = client.get("/engagements/999999")
     assert resp.status_code == 404

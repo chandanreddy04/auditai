@@ -1,10 +1,15 @@
 """
-The whole Phase 1 vertical slice, wired together: upload evidence,
-extract it, reconcile it, and let a human clear the exceptions that
-come out. Every route that touches an engagement takes client_id in
-the URL alongside engagement_id and checks the engagement actually
-belongs to that client - the isolation boundary from models.py's
-docstring enforced again at the query layer, not just assumed.
+The whole app's routes, wired together across all five phases. Every
+route that touches an engagement takes client_id in the URL alongside
+engagement_id and checks the engagement actually belongs to that
+client - the isolation boundary from models.py's docstring enforced
+again at the query layer, not just assumed.
+
+As of Phase 5, this file no longer sequences agents itself - uploading
+a document just hands off to orchestration_service.run_document_pipeline()
+and gets back a fully-recorded OrchestrationRun. Routes create things,
+render pages, and let a human resolve/dismiss/finalize/receive/waive -
+coordinating agents is orchestration_service.py's job now.
 """
 
 import logging
@@ -19,19 +24,15 @@ from sqlalchemy.orm import Session
 from app.core.config import UPLOAD_DIR
 from app.database.session import get_db
 from app.models.models import (
-    Client, Control, ControlRuleType, ControlTestResult, ControlTestStatus,
-    Document, DocumentStatus, DocumentType, Engagement, EngagementStatus,
-    EvidenceRecord, ExceptionStatus, PBCRequest, PBCStatus,
+    Client, Control, ControlRuleType, ControlTestResult, Document,
+    Engagement, EvidenceRecord, ExceptionStatus, PBCRequest, PBCStatus,
     ReconciliationException, Workpaper, WorkpaperStatus,
 )
 from app.services import audit_log_service
-from app.services import controls_testing_service as controls_svc
+from app.services import orchestration_service
 from app.services import pbc_service
 from app.services import workpaper_service
-from app.services.evidence_extraction_service import extract_evidence
 from app.services.llm_client import LLMUnavailableError
-from app.services.pdf_text_service import extract_text, has_extractable_text
-from app.services.reconciliation_service import EvidenceLike, run_reconciliation
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -139,179 +140,9 @@ async def upload_document(engagement_id: int, file: UploadFile, db: Session = De
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
 
-    _extract_and_reconcile(db, document, engagement)
+    orchestration_service.run_document_pipeline(db, document, engagement)
 
     return RedirectResponse(url=f"/engagements/{engagement_id}", status_code=303)
-
-
-def _extract_and_reconcile(db: Session, document: Document, engagement: Engagement) -> None:
-    """Text extraction -> LLM evidence extraction -> full re-reconciliation
-    of the engagement. Any failure at any step marks the document FAILED
-    with a human-readable reason instead of silently leaving it stuck -
-    same "never fail invisibly" discipline as the rest of this project's
-    LLM-touching code."""
-    try:
-        text = extract_text(document.file_path)
-    except Exception as e:
-        logger.warning("PDF text extraction failed for document %s: %s", document.id, e)
-        document.status = DocumentStatus.FAILED
-        document.failure_reason = "Could not read this file as a PDF."
-        db.commit()
-        return
-
-    if not has_extractable_text(text):
-        document.status = DocumentStatus.FAILED
-        document.failure_reason = (
-            "No text layer found (likely a scanned image). Vision-based "
-            "extraction for scanned documents is a planned fast-follow, "
-            "not yet part of this Phase 1 build."
-        )
-        db.commit()
-        return
-
-    document.raw_text = text
-
-    try:
-        extracted = extract_evidence(text)
-    except LLMUnavailableError as e:
-        document.status = DocumentStatus.FAILED
-        document.failure_reason = f"AI extraction unavailable: {e}"
-        db.commit()
-        audit_log_service.log(
-            db, actor="evidence_extraction_service", action="extraction_failed", detail=str(e),
-            engagement_id=engagement.id, client_id=engagement.client_id,
-        )
-        return
-
-    try:
-        doc_type = DocumentType(extracted.doc_type)
-    except ValueError:
-        doc_type = DocumentType.UNKNOWN
-
-    document.doc_type = doc_type
-    document.status = DocumentStatus.EXTRACTED
-    db.commit()
-
-    record = EvidenceRecord(
-        document_id=document.id, engagement_id=engagement.id, client_id=engagement.client_id,
-        doc_type=doc_type, vendor_name=extracted.vendor_name,
-        reference_number=extracted.reference_number, related_reference_number=extracted.related_reference_number,
-        amount=extracted.amount, currency=extracted.currency, record_date=extracted.record_date,
-        approver_name=extracted.approver_name,
-    )
-    db.add(record)
-    db.commit()
-
-    audit_log_service.log(
-        db, actor="evidence_extraction_service", action="evidence_extracted",
-        detail=f"{doc_type.value} ref={extracted.reference_number} amount={extracted.amount}",
-        engagement_id=engagement.id, client_id=engagement.client_id,
-    )
-
-    _run_and_persist_reconciliation(db, engagement)
-    _run_and_persist_controls_testing(db, engagement)
-
-
-def _run_and_persist_reconciliation(db: Session, engagement: Engagement) -> None:
-    """Re-runs reconciliation across ALL of the engagement's evidence
-    every time new evidence arrives - simplest correct approach for
-    Phase 1's volumes. Only adds NEW open exceptions (same type + same
-    evidence records not already open); never touches an exception a
-    human has already resolved or dismissed, and never auto-closes one
-    either - only a human does that."""
-    records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
-    evidence_like = [
-        EvidenceLike(
-            id=r.id, doc_type=r.doc_type, reference_number=r.reference_number,
-            related_reference_number=r.related_reference_number, amount=r.amount, vendor_name=r.vendor_name,
-        )
-        for r in records
-    ]
-    results = run_reconciliation(evidence_like)
-
-    existing_open = (
-        db.query(ReconciliationException)
-        .filter(ReconciliationException.engagement_id == engagement.id, ReconciliationException.status == ExceptionStatus.OPEN)
-        .all()
-    )
-    existing_keys = {(e.exception_type.value, e.evidence_record_ids) for e in existing_open}
-
-    new_count = 0
-    for result in results:
-        ids_str = ",".join(str(i) for i in sorted(result.evidence_record_ids))
-        key = (result.exception_type, ids_str)
-        if key in existing_keys:
-            continue
-        db.add(ReconciliationException(
-            engagement_id=engagement.id, client_id=engagement.client_id,
-            exception_type=result.exception_type, description=result.description,
-            evidence_record_ids=ids_str, severity=result.severity,
-        ))
-        new_count += 1
-    db.commit()
-
-    audit_log_service.log(
-        db, actor="reconciliation_engine", action="reconciliation_run",
-        detail=f"{len(results)} exceptions found, {new_count} new",
-        engagement_id=engagement.id, client_id=engagement.client_id,
-    )
-
-
-def _run_and_persist_controls_testing(db: Session, engagement: Engagement) -> None:
-    """Phase 2, same re-run-everything-every-time approach as
-    reconciliation above: test every active control against every
-    evidence record in the engagement. A PASS is written RESOLVED
-    immediately - nothing for a human to review, the evidence already
-    satisfies the control. A FAIL is only written OPEN the first time;
-    once a human has resolved or dismissed a given (control, evidence
-    record) failure, re-running never reopens or duplicates it."""
-    active_controls = db.query(Control).filter(Control.engagement_id == engagement.id, Control.active == "active").all()
-    if not active_controls:
-        return
-
-    records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
-    control_like = [
-        controls_svc.ControlLike(id=c.id, rule_type=c.rule_type, threshold_amount=c.threshold_amount)
-        for c in active_controls
-    ]
-    evidence_like = [
-        controls_svc.EvidenceLike(
-            id=r.id, doc_type=r.doc_type, reference_number=r.reference_number,
-            related_reference_number=r.related_reference_number, amount=r.amount, approver_name=r.approver_name,
-        )
-        for r in records
-    ]
-    results = controls_svc.run_controls_testing(control_like, evidence_like)
-
-    existing = (
-        db.query(ControlTestResult)
-        .filter(ControlTestResult.engagement_id == engagement.id)
-        .all()
-    )
-    existing_keys = {(e.control_id, e.evidence_record_id) for e in existing}
-
-    new_pass, new_fail = 0, 0
-    for result in results:
-        key = (result.control_id, result.evidence_record_id)
-        if key in existing_keys:
-            continue
-        is_pass = result.result == "pass"
-        db.add(ControlTestResult(
-            control_id=result.control_id, engagement_id=engagement.id, client_id=engagement.client_id,
-            evidence_record_id=result.evidence_record_id, result=ControlTestStatus(result.result), detail=result.detail,
-            status=ExceptionStatus.RESOLVED if is_pass else ExceptionStatus.OPEN,
-            resolved_by="controls_testing_engine" if is_pass else None,
-            resolution_note="Passed automatically - evidence satisfies the control." if is_pass else None,
-        ))
-        new_pass += 1 if is_pass else 0
-        new_fail += 0 if is_pass else 1
-    db.commit()
-
-    audit_log_service.log(
-        db, actor="controls_testing_engine", action="controls_testing_run",
-        detail=f"{len(results)} results ({new_pass} new pass, {new_fail} new fail)",
-        engagement_id=engagement.id, client_id=engagement.client_id,
-    )
 
 
 # -------------------------------------------------------- exception queue
@@ -409,7 +240,7 @@ def create_control(
         detail=f"{control.name} ({control.rule_type.value}, threshold={control.threshold_amount:,.2f})",
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
-    _run_and_persist_controls_testing(db, engagement)
+    orchestration_service.run_controls_testing_agent(db, engagement)
     return RedirectResponse(url=f"/engagements/{engagement_id}/controls", status_code=303)
 
 
@@ -672,6 +503,34 @@ def draft_pbc_reminder(request: Request, engagement_id: int, db: Session = Depen
             "has_overdue": bool(overdue_ids), "reminder_draft": reminder_draft,
         },
     )
+
+
+# ---------------------------------------------------------- orchestration
+
+@router.get("/engagements/{engagement_id}/orchestration")
+def orchestration_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+    from app.models.models import OrchestrationRun
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    runs = (
+        db.query(OrchestrationRun)
+        .filter(OrchestrationRun.engagement_id == engagement_id)
+        .order_by(OrchestrationRun.started_at.desc())
+        .limit(30)
+        .all()
+    )
+    return templates.TemplateResponse("orchestration.html", {"request": request, "engagement": engagement, "runs": runs})
+
+
+@router.post("/engagements/{engagement_id}/run-full-check")
+def run_full_check(engagement_id: int, triggered_by: str = Form(...), db: Session = Depends(get_db)):
+    """The one manually-triggered orchestration entry point: re-runs
+    reconciliation + controls testing across ALL of an engagement's
+    evidence without needing a new document upload - e.g. right after
+    defining or changing a control."""
+    engagement = _get_engagement_or_404(db, engagement_id)
+    orchestration_service.run_full_engagement_check(db, engagement, triggered_by=triggered_by.strip())
+    return RedirectResponse(url=f"/engagements/{engagement_id}/orchestration", status_code=303)
 
 
 # -------------------------------------------------------------- audit log

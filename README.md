@@ -9,16 +9,16 @@ everything that actually matters.
 The full design calls for a dozen specialist agents (document intake,
 transaction testing, fraud-risk detection, controls testing, workpaper
 drafting, and more — see the requirements this was built from). This
-repo is built **one phase at a time**, per that requirements doc's own
+repo was built **one phase at a time**, per that requirements doc's own
 recommendation: prove one narrow, reliable, explainable workflow before
-adding the next.
+adding the next. All five planned phases are now built.
 
 ```
 Phase 1: document intake  →  AI extraction  →  reconciliation  →  exception detection  →  human review   [done]
 Phase 2: controls testing (policy rules tested against the same evidence)                                [done]
 Phase 3: workpaper drafting                                                                               [done]
 Phase 4: PBC / request tracking                                                                           [done]
-Phase 5: multi-agent orchestration across all of the above                                                [next]
+Phase 5: multi-agent orchestration across all of the above                                                [done]
 ```
 
 ## Why it's built this way
@@ -103,7 +103,28 @@ a polite reminder email listing only the already-computed overdue
 items and how many days overdue each is — the auditor copies, reviews,
 and sends it themselves; this app never sends mail on anyone's behalf.
 
-All four phases share: an append-only audit log of every agent action
+**Phase 5 — multi-agent orchestration.** Before this phase, uploading a
+document quietly called three functions in a row inside a route
+handler — extraction, reconciliation, controls testing — with no
+record beyond scattered audit-log prose lines that it happened in that
+order. [`orchestration_service.py`](app/services/orchestration_service.py)
+makes that sequencing explicit: every upload creates a persisted
+`OrchestrationRun` with an ordered `OrchestrationStep` per agent - which
+one ran, in what order, with what result, how long it took. If
+extraction fails or finds nothing to extract, the downstream
+reconciliation and controls-testing steps are recorded as **SKIPPED**
+with a reason, not silently absent — the full intended pipeline is
+always visible, never just the steps that happened to execute. A
+second, human-triggered entry point (`/engagements/{id}/orchestration`,
+"Run full check now") re-runs reconciliation and controls testing
+across all existing evidence on demand — useful right after defining a
+new control, without re-uploading anything. This adds no new judgment
+anywhere: every agent it calls already existed and already made its
+own decisions in Phases 1-2; orchestration only coordinates and writes
+down that it did, closing the loop on the blueprint's own architecture
+diagram (Human Auditor → Orchestrator → testing agents → Human Review).
+
+All five phases share: an append-only audit log of every agent action
 and every human decision, and a human review queue where nothing
 auto-closes on its own.
 
@@ -125,10 +146,18 @@ auto-closes on its own.
 - **No real authentication.** "Resolved by" is a typed name, not a
   login. Fine for proving the workflow; not fine for anything handling
   real client data.
-- **No multi-agent orchestration yet.** Each phase is its own
-  independent deterministic engine triggered after upload - not a team
-  of agents coordinating with each other. That's Phase 5, only once
-  everything before it is trustworthy on its own.
+- **The orchestrator only coordinates the automatic per-upload pipeline
+  and the manual full-check re-run.** Workpaper drafting and PBC
+  reminders are deliberately NOT part of any orchestrated pipeline -
+  they stay human-triggered "when I'm ready" actions (see their own
+  phase notes above), so they don't appear in the orchestration
+  history. A more complete orchestration layer might let an auditor
+  compose a custom pipeline across all five phases; this one runs the
+  two pipelines that were actually useful to automate.
+- **No background job queue.** An OrchestrationRun is always
+  synchronous, start to finish, within one HTTP request - there is no
+  "in progress" status, and a slow LLM step (see the note below) means
+  the browser waits for the whole request to complete.
 - **Controls are defined per-engagement, not as a reusable client
   policy library.** A control an auditor defines on one engagement
   doesn't carry over to next year's engagement for the same client yet.
@@ -173,10 +202,13 @@ pytest
 `test_pbc_service.py`, and the summary-building half of
 `test_workpaper_service.py` cover the four decision/summary engines
 with zero LLM calls — pure input/output, deterministic, fast.
-`test_api.py` exercises the full route flow (clients, engagements,
-uploads, exceptions, controls, workpaper generate/edit/finalize, PBC
-requests/receive/waive/reminder) end to end against a throwaway SQLite
-database. `test_evidence_extraction_service.py` and the drafting
+`test_orchestration_service.py` covers the coordination logic itself
+(step ordering, skip-on-failure, run-status rollup) with the LLM-touching
+extraction call mocked. `test_api.py` exercises the full route flow
+(clients, engagements, uploads, exceptions, controls, workpaper
+generate/edit/finalize, PBC requests/receive/waive/reminder,
+orchestration runs/manual full-check) end to end against a throwaway
+SQLite database. `test_evidence_extraction_service.py` and the drafting
 halves of `test_workpaper_service.py`/`test_pbc_service.py` cover
 LLM-touching code with the model call mocked.
 
@@ -194,7 +226,8 @@ app/
   core/config.py                     settings, one seam for the environment
   models/models.py                   Client, Engagement, Document, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
-                                      Workpaper, PBCRequest, AuditLogEntry
+                                      Workpaper, PBCRequest, OrchestrationRun,
+                                      OrchestrationStep, AuditLogEntry
   database/session.py                engine, session factory, get_db()
   schemas/extraction.py              the schema the LLM's output is constrained to
   services/
@@ -205,6 +238,7 @@ app/
     controls_testing_service.py      deterministic: Phase 2's decision engine
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
     pbc_service.py                   deterministic overdue calc + Phase 4's one LLM call
+    orchestration_service.py         Phase 5: coordinates the agents above, logs every step
     audit_log_service.py             one function, called after every action
   web/routes.py                      the whole app, wired together
 tests/
@@ -219,4 +253,6 @@ consequential judgment with a licensed human auditor. That document's
 own recommendation was followed literally: *"do not begin by building
 ten autonomous agents — start with one narrow, measurable workflow and
 make it reliable, secure, and explainable, then add capabilities in
-phases."* This repo is that recommendation, built one phase at a time.
+phases."* This repo is that recommendation, built one phase at a time -
+all five planned phases now complete, 72 tests passing, every feature
+verified live against a real local model, not just against mocks.
