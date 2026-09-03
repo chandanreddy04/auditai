@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{{ client.name }} - AuditAI{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / {{ client.name }}</p>
+<h1>{{ client.name }}</h1>
+
+<table class="list">
+    <thead><tr><th>Engagement</th><th>Type</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for e in engagements %}
+        <tr>
+            <td><a href="/engagements/{{ e.id }}">{{ e.name }}</a></td>
+            <td>{{ e.audit_type }}</td>
+            <td><span class="badge">{{ e.status.value }}</span></td>
+            <td><a href="/engagements/{{ e.id }}">Open &rarr;</a></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">No engagements yet for this client.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<h2>Start a new engagement</h2>
+<form method="post" action="/clients/{{ client.id }}/engagements" class="inline-form">
+    <input type="text" name="name" placeholder="e.g. FY2026 Financial Audit" required>
+    <select name="audit_type">
+        {% for t in audit_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+    </select>
+    <button type="submit">Start engagement</button>
+</form>
+{% endblock %}

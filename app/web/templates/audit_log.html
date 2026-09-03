@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Audit log - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Audit log</p>
+<h1>Audit log</h1>
+<p class="subtle">Append-only record of every agent action and human decision on this engagement.</p>
+
+<table class="list">
+    <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for entry in entries %}
+        <tr>
+            <td>{{ entry.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+            <td>{{ entry.actor }}</td>
+            <td>{{ entry.action }}</td>
+            <td>{{ entry.detail }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing logged yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

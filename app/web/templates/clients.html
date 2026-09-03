@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Clients - AuditAI{% endblock %}
+{% block content %}
+<h1>Clients</h1>
+<p class="subtle">Each client is a fully isolated audit workspace - documents, evidence, and exceptions never cross between clients.</p>
+
+<table class="list">
+    <thead><tr><th>Client</th><th>Engagements</th><th></th></tr></thead>
+    <tbody>
+    {% for client in clients %}
+        <tr>
+            <td><a href="/clients/{{ client.id }}">{{ client.name }}</a></td>
+            <td>{{ client.engagements|length }}</td>
+            <td><a href="/clients/{{ client.id }}">Open &rarr;</a></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="3" class="empty">No clients yet - add one below.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<h2>Add a client</h2>
+<form method="post" action="/clients" class="inline-form">
+    <input type="text" name="name" placeholder="Client company name" required>
+    <button type="submit">Add client</button>
+</form>
+{% endblock %}

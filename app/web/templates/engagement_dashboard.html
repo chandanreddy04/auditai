@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ engagement.name }} - AuditAI{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / {{ engagement.name }}</p>
+<h1>{{ engagement.name }}</h1>
+
+<div class="stat-row">
+    <div class="stat"><span class="stat-num">{{ documents|length }}</span><span class="stat-label">documents</span></div>
+    <div class="stat"><span class="stat-num">{{ evidence_count }}</span><span class="stat-label">evidence records</span></div>
+    <div class="stat {{ 'stat-alert' if open_exceptions else '' }}">
+        <span class="stat-num">{{ open_exceptions }}</span><span class="stat-label">open exceptions</span>
+    </div>
+</div>
+
+<p>
+    <a href="/engagements/{{ engagement.id }}/exceptions" class="button">Review exceptions &rarr;</a>
+    <a href="/engagements/{{ engagement.id }}/audit-log" class="button secondary">View audit log &rarr;</a>
+</p>
+
+<h2>Upload evidence</h2>
+<p class="subtle">Purchase orders, invoices, payment records - PDF with a real text layer (not a scanned image, for Phase 1).</p>
+<form method="post" action="/engagements/{{ engagement.id }}/documents" enctype="multipart/form-data" class="inline-form">
+    <input type="file" name="file" accept="application/pdf" required>
+    <button type="submit">Upload &amp; extract</button>
+</form>
+
+<h2>Documents</h2>
+<table class="list">
+    <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Uploaded</th></tr></thead>
+    <tbody>
+    {% for d in documents %}
+        <tr>
+            <td>{{ d.filename }}</td>
+            <td>{{ d.doc_type.value }}</td>
+            <td>
+                <span class="badge badge-{{ d.status.value }}">{{ d.status.value }}</span>
+                {% if d.failure_reason %}<div class="subtle small">{{ d.failure_reason }}</div>{% endif %}
+            </td>
+            <td>{{ d.uploaded_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">No documents uploaded yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

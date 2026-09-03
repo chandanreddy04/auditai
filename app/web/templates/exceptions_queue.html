@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Exceptions - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Exceptions</p>
+<h1>Exception review queue</h1>
+<p class="subtle">Everything here was flagged by plain rule-based comparison, not by the AI - reference numbers that don't chain up, amounts that don't match, duplicates. Only a human closes one of these.</p>
+
+<h2>Open ({{ open_exceptions|length }})</h2>
+{% for exc in open_exceptions %}
+<div class="exception-card severity-{{ exc.severity }}">
+    <div class="exception-head">
+        <span class="badge">{{ exc.exception_type.value }}</span>
+        <span class="badge severity-badge">{{ exc.severity }}</span>
+    </div>
+    <p>{{ exc.description }}</p>
+    <p class="subtle small">Evidence record IDs: {{ exc.evidence_record_ids }}</p>
+    <form method="post" action="/exceptions/{{ exc.id }}/resolve" class="inline-form">
+        <input type="text" name="resolved_by" placeholder="Your name" required>
+        <input type="text" name="resolution_note" placeholder="Resolution note (what did you find?)">
+        <button type="submit" name="action" value="resolved">Resolve</button>
+        <button type="submit" name="action" value="dismissed" class="secondary">Dismiss (false positive)</button>
+    </form>
+</div>
+{% else %}
+<p class="empty">No open exceptions - everything reconciles cleanly so far.</p>
+{% endfor %}
+
+<h2>Recently closed</h2>
+<table class="list">
+    <thead><tr><th>Type</th><th>Description</th><th>Closed by</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for exc in resolved_exceptions %}
+        <tr>
+            <td><span class="badge">{{ exc.exception_type.value }}</span> <span class="subtle small">{{ exc.status.value }}</span></td>
+            <td>{{ exc.description }}</td>
+            <td>{{ exc.resolved_by }}</td>
+            <td>{{ exc.resolution_note }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing closed yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
