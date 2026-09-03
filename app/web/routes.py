@@ -21,10 +21,12 @@ from app.database.session import get_db
 from app.models.models import (
     Client, Control, ControlRuleType, ControlTestResult, ControlTestStatus,
     Document, DocumentStatus, DocumentType, Engagement, EngagementStatus,
-    EvidenceRecord, ExceptionStatus, ReconciliationException, Workpaper, WorkpaperStatus,
+    EvidenceRecord, ExceptionStatus, PBCRequest, PBCStatus,
+    ReconciliationException, Workpaper, WorkpaperStatus,
 )
 from app.services import audit_log_service
 from app.services import controls_testing_service as controls_svc
+from app.services import pbc_service
 from app.services import workpaper_service
 from app.services.evidence_extraction_service import extract_evidence
 from app.services.llm_client import LLMUnavailableError
@@ -530,6 +532,146 @@ def finalize_workpaper(engagement_id: int, finalized_by: str = Form(...), db: Se
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
     return RedirectResponse(url=f"/engagements/{engagement_id}/workpaper", status_code=303)
+
+
+# ------------------------------------------------------------------- pbc
+
+@router.get("/engagements/{engagement_id}/pbc")
+def pbc_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+    from datetime import date
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    requests_ = db.query(PBCRequest).filter(PBCRequest.engagement_id == engagement_id).order_by(PBCRequest.requested_at).all()
+    documents = db.query(Document).filter(Document.engagement_id == engagement_id).order_by(Document.filename).all()
+
+    today = date.today()
+    pbc_like = [pbc_service.PBCLike(id=r.id, item_name=r.item_name, due_date=r.due_date, status=r.status.value) for r in requests_]
+    overdue_ids = {o.id for o in pbc_service.find_overdue(pbc_like, today)}
+
+    open_requests = [r for r in requests_ if r.status == PBCStatus.REQUESTED]
+    closed_requests = [r for r in requests_ if r.status != PBCStatus.REQUESTED]
+
+    return templates.TemplateResponse(
+        "pbc.html",
+        {
+            "request": request, "engagement": engagement, "open_requests": open_requests,
+            "closed_requests": closed_requests, "overdue_ids": overdue_ids, "documents": documents,
+            "has_overdue": bool(overdue_ids), "reminder_draft": None,
+        },
+    )
+
+
+@router.post("/engagements/{engagement_id}/pbc")
+def create_pbc_request(
+    engagement_id: int, item_name: str = Form(...), description: str = Form(""),
+    due_date: str = Form(""), db: Session = Depends(get_db),
+):
+    from datetime import date as date_cls
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    parsed_due = date_cls.fromisoformat(due_date) if due_date.strip() else None
+    req = PBCRequest(
+        engagement_id=engagement_id, client_id=engagement.client_id,
+        item_name=item_name.strip(), description=description.strip() or None, due_date=parsed_due,
+    )
+    db.add(req)
+    db.commit()
+    audit_log_service.log(
+        db, actor="human", action="pbc_requested", detail=f"{req.item_name} (due {due_date or 'no date set'})",
+        engagement_id=engagement_id, client_id=engagement.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{engagement_id}/pbc", status_code=303)
+
+
+@router.post("/pbc/{request_id}/receive")
+def receive_pbc_request(
+    request_id: int, resolved_by: str = Form(...), resolution_note: str = Form(""),
+    linked_document_id: str = Form(""), db: Session = Depends(get_db),
+):
+    from datetime import datetime, timezone
+
+    req = db.get(PBCRequest, request_id)
+    if req is None:
+        raise HTTPException(404, "PBC request not found")
+
+    req.status = PBCStatus.RECEIVED
+    req.resolved_by = resolved_by.strip()
+    req.resolution_note = resolution_note.strip() or None
+    req.resolved_at = datetime.now(timezone.utc)
+    if linked_document_id.strip():
+        req.linked_document_id = int(linked_document_id)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=resolved_by.strip(), action="pbc_received", detail=f"{req.item_name}: {req.resolution_note or ''}",
+        engagement_id=req.engagement_id, client_id=req.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
+
+
+@router.post("/pbc/{request_id}/waive")
+def waive_pbc_request(request_id: int, resolved_by: str = Form(...), resolution_note: str = Form(...), db: Session = Depends(get_db)):
+    from datetime import datetime, timezone
+
+    req = db.get(PBCRequest, request_id)
+    if req is None:
+        raise HTTPException(404, "PBC request not found")
+
+    req.status = PBCStatus.WAIVED
+    req.resolved_by = resolved_by.strip()
+    req.resolution_note = resolution_note.strip()
+    req.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=resolved_by.strip(), action="pbc_waived", detail=f"{req.item_name}: {req.resolution_note}",
+        engagement_id=req.engagement_id, client_id=req.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
+
+
+@router.post("/engagements/{engagement_id}/pbc/draft-reminder")
+def draft_pbc_reminder(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+    """Renders the page directly with a drafted reminder rather than
+    redirecting - the draft is deliberately not persisted anywhere
+    (it's a one-off convenience, not a fact worth storing), so a
+    redirect would just lose it. The auditor copies it into their own
+    email client and sends it themselves; this app never sends mail on
+    anyone's behalf, per the project's own rule about external
+    messages always needing a human action."""
+    from datetime import date
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    requests_ = db.query(PBCRequest).filter(PBCRequest.engagement_id == engagement_id).all()
+    documents = db.query(Document).filter(Document.engagement_id == engagement_id).order_by(Document.filename).all()
+
+    today = date.today()
+    pbc_like = [pbc_service.PBCLike(id=r.id, item_name=r.item_name, due_date=r.due_date, status=r.status.value) for r in requests_]
+    overdue = pbc_service.find_overdue(pbc_like, today)
+
+    reminder_draft = None
+    if overdue:
+        try:
+            reminder_draft = pbc_service.draft_reminder_email(engagement.client.name, engagement.name, overdue)
+            audit_log_service.log(
+                db, actor="pbc_service", action="pbc_reminder_drafted", detail=f"{len(overdue)} overdue items",
+                engagement_id=engagement_id, client_id=engagement.client_id,
+            )
+        except LLMUnavailableError as e:
+            reminder_draft = f"(AI drafting unavailable: {e})"
+
+    overdue_ids = {o.id for o in overdue}
+    open_requests = [r for r in requests_ if r.status == PBCStatus.REQUESTED]
+    closed_requests = [r for r in requests_ if r.status != PBCStatus.REQUESTED]
+
+    return templates.TemplateResponse(
+        "pbc.html",
+        {
+            "request": request, "engagement": engagement, "open_requests": open_requests,
+            "closed_requests": closed_requests, "overdue_ids": overdue_ids, "documents": documents,
+            "has_overdue": bool(overdue_ids), "reminder_draft": reminder_draft,
+        },
+    )
 
 
 # -------------------------------------------------------------- audit log

@@ -17,8 +17,8 @@ adding the next.
 Phase 1: document intake  →  AI extraction  →  reconciliation  →  exception detection  →  human review   [done]
 Phase 2: controls testing (policy rules tested against the same evidence)                                [done]
 Phase 3: workpaper drafting                                                                               [done]
-Phase 4: PBC / request tracking                                                                           [next]
-Phase 5: multi-agent orchestration across all of the above
+Phase 4: PBC / request tracking                                                                           [done]
+Phase 5: multi-agent orchestration across all of the above                                                [next]
 ```
 
 ## Why it's built this way
@@ -90,7 +90,20 @@ other consequential action. Live-tested this generates an accurate,
 fact-checkable memo — every number and finding in the draft traced
 back to a real row in the database, nothing invented.
 
-All three phases share: an append-only audit log of every agent action
+**Phase 4 — PBC (Provided-By-Client) tracking.** The most standalone
+phase so far — doesn't require any evidence to exist first. An auditor
+logs requests sent to the client (a document, a schedule, an
+explanation), each with an optional due date. "Overdue" is never
+stored; it's computed fresh every time from today vs. the due date
+([`pbc_service.py`](app/services/pbc_service.py)), so it can never
+drift out of date the way a stored status could. A human marks an item
+received (optionally linking it to a Document actually uploaded to
+satisfy it) or waived. The one LLM touch in this phase: a button drafts
+a polite reminder email listing only the already-computed overdue
+items and how many days overdue each is — the auditor copies, reviews,
+and sends it themselves; this app never sends mail on anyone's behalf.
+
+All four phases share: an append-only audit log of every agent action
 and every human decision, and a human review queue where nothing
 auto-closes on its own.
 
@@ -123,6 +136,14 @@ auto-closes on its own.
   "Generate draft" overwrites the current draft's content (only ever a
   concern before finalizing - finalized workpapers are locked). A real
   version history is a natural improvement, not built yet.
+- **Free-form drafting calls (the workpaper memo, the PBC reminder
+  email) are noticeably slower than the schema-constrained extraction
+  calls** on CPU-only local Ollama — observed 1-3+ minutes for a
+  several-paragraph draft, versus a few seconds for structured
+  extraction. Ollama also serializes requests, so submitting a second
+  draft before the first finishes queues behind it rather than running
+  in parallel. Not a code bug - a real characteristic of local CPU
+  inference worth knowing about if a request appears to hang.
 
 ## Running it locally
 
@@ -149,22 +170,22 @@ pytest
 ```
 
 `test_reconciliation_service.py`, `test_controls_testing_service.py`,
-and the summary-building half of `test_workpaper_service.py` cover the
-three decision/summary engines with zero LLM calls — pure input/output,
-deterministic, fast. `test_api.py` exercises the full route flow
-(clients, engagements, uploads, exceptions, controls, workpaper
-generate/edit/finalize) end to end against a throwaway SQLite database.
-`test_evidence_extraction_service.py` and the drafting half of
-`test_workpaper_service.py` cover LLM-touching code with the model call
-mocked.
+`test_pbc_service.py`, and the summary-building half of
+`test_workpaper_service.py` cover the four decision/summary engines
+with zero LLM calls — pure input/output, deterministic, fast.
+`test_api.py` exercises the full route flow (clients, engagements,
+uploads, exceptions, controls, workpaper generate/edit/finalize, PBC
+requests/receive/waive/reminder) end to end against a throwaway SQLite
+database. `test_evidence_extraction_service.py` and the drafting
+halves of `test_workpaper_service.py`/`test_pbc_service.py` cover
+LLM-touching code with the model call mocked.
 
 Every feature here has also been verified **live**, not just against
 mocks: a real local model (phi3.5 via Ollama), a real running server,
 real generated PDFs uploaded through the actual routes and browser UI.
-Two real extraction bugs, and one prompt-formatting issue in the
-workpaper drafter (unwanted letter-style headers/signature blocks),
-were found and fixed this way (see git log) — mocked tests alone would
-not have caught any of them.
+Two real extraction bugs and one prompt-formatting issue in the
+workpaper drafter were found and fixed this way (see git log) — mocked
+tests alone would not have caught any of them.
 
 ## Project layout
 
@@ -173,7 +194,7 @@ app/
   core/config.py                     settings, one seam for the environment
   models/models.py                   Client, Engagement, Document, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
-                                      Workpaper, AuditLogEntry
+                                      Workpaper, PBCRequest, AuditLogEntry
   database/session.py                engine, session factory, get_db()
   schemas/extraction.py              the schema the LLM's output is constrained to
   services/
@@ -183,6 +204,7 @@ app/
     reconciliation_service.py        deterministic: Phase 1's decision engine
     controls_testing_service.py      deterministic: Phase 2's decision engine
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
+    pbc_service.py                   deterministic overdue calc + Phase 4's one LLM call
     audit_log_service.py             one function, called after every action
   web/routes.py                      the whole app, wired together
 tests/

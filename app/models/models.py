@@ -13,7 +13,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text,
+    Column, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -242,6 +242,43 @@ class Workpaper(Base):
     updated_at = Column(DateTime, nullable=True)
     finalized_by = Column(String(200), nullable=True)
     finalized_at = Column(DateTime, nullable=True)
+
+
+class PBCStatus(str, enum.Enum):
+    """PBC = "Provided By Client" - the auditor's own term for a request
+    sent to the client (a document, a schedule, an explanation) that
+    the client, not the auditor, has to fulfill."""
+    REQUESTED = "requested"
+    RECEIVED = "received"
+    WAIVED = "waived"  # the auditor decided this item is no longer needed
+
+
+class PBCRequest(Base):
+    """Phase 4. One item on the request list sent to a client for this
+    engagement. Deliberately more standalone than Phases 1-3: it
+    doesn't require any evidence extraction or reconciliation to exist,
+    though a received item can optionally link to a Document that was
+    actually uploaded to satisfy it. "Overdue" is never stored - it's
+    computed on the fly from due_date vs. today (see pbc_service.py) so
+    it's always accurate and never needs a background job to update it.
+    Only a human marks an item received or waived; nothing here is ever
+    set by an agent."""
+    __tablename__ = "pbc_requests"
+
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    item_name = Column(String(300), nullable=False)
+    description = Column(Text, nullable=True)
+    due_date = Column(Date, nullable=True)
+    status = Column(Enum(PBCStatus), default=PBCStatus.REQUESTED)
+    linked_document_id = Column(Integer, ForeignKey("documents.id"), nullable=True)
+    resolved_by = Column(String(200), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    requested_at = Column(DateTime, default=_now)
+    resolved_at = Column(DateTime, nullable=True)
+
+    linked_document = relationship("Document")
 
 
 class AuditLogEntry(Base):

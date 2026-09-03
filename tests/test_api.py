@@ -213,6 +213,92 @@ def test_workpaper_flow(monkeypatch):
     assert resp.status_code == 400
 
 
+def test_pbc_flow(monkeypatch):
+    from datetime import date, timedelta
+
+    from app.database.session import SessionLocal
+    from app.models.models import Client, Engagement, PBCRequest
+    from app.web import routes as routes_module
+
+    monkeypatch.setattr(routes_module.pbc_service, "draft_reminder_email", lambda client_name, engagement_name, overdue: "Please send the overdue items.")
+
+    client.post("/clients", data={"name": "PBC Test Corp"}, follow_redirects=False)
+    db = SessionLocal()
+    acme = db.query(Client).filter(Client.name == "PBC Test Corp").first()
+    db.close()
+
+    client.post(
+        f"/clients/{acme.id}/engagements",
+        data={"name": "PBC Engagement", "audit_type": "financial"},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    engagement = db.query(Engagement).filter(Engagement.client_id == acme.id).first()
+    db.close()
+
+    resp = client.get(f"/engagements/{engagement.id}/pbc")
+    assert resp.status_code == 200
+
+    overdue_due = (date.today() - timedelta(days=5)).isoformat()
+    future_due = (date.today() + timedelta(days=5)).isoformat()
+
+    resp = client.post(
+        f"/engagements/{engagement.id}/pbc",
+        data={"item_name": "Bank statements", "description": "Q1-Q4", "due_date": overdue_due},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    client.post(
+        f"/engagements/{engagement.id}/pbc",
+        data={"item_name": "Lease agreements", "due_date": future_due},
+        follow_redirects=False,
+    )
+
+    resp = client.get(f"/engagements/{engagement.id}/pbc")
+    assert "Bank statements" in resp.text
+    assert "overdue" in resp.text.lower()
+    assert "Draft reminder email" in resp.text  # only shown because an overdue item exists
+
+    db = SessionLocal()
+    bank_item = db.query(PBCRequest).filter(PBCRequest.item_name == "Bank statements").first()
+    lease_item = db.query(PBCRequest).filter(PBCRequest.item_name == "Lease agreements").first()
+    db.close()
+
+    # Draft a reminder (LLM mocked) - rendered directly, not persisted.
+    resp = client.post(f"/engagements/{engagement.id}/pbc/draft-reminder")
+    assert resp.status_code == 200
+    assert "Please send the overdue items." in resp.text
+
+    # Mark the overdue one received.
+    resp = client.post(
+        f"/pbc/{bank_item.id}/receive",
+        data={"resolved_by": "Test Auditor", "resolution_note": "Received via email", "linked_document_id": ""},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    # Waive the other one.
+    resp = client.post(
+        f"/pbc/{lease_item.id}/waive",
+        data={"resolved_by": "Test Auditor", "resolution_note": "Not needed for this scope"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    bank_item = db.get(PBCRequest, bank_item.id)
+    lease_item = db.get(PBCRequest, lease_item.id)
+    db.close()
+    assert bank_item.status.value == "received"
+    assert lease_item.status.value == "waived"
+
+    resp = client.get(f"/engagements/{engagement.id}/pbc")
+    assert resp.status_code == 200
+    assert "Open requests (0)" in resp.text
+    assert "Closed (2)" in resp.text
+
+
 def test_missing_engagement_is_404():
     resp = client.get("/engagements/999999")
     assert resp.status_code == 404

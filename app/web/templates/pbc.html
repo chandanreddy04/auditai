@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}PBC Tracking - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / PBC tracking</p>
+<h1>PBC (Provided-By-Client) tracking</h1>
+<p class="subtle">Items requested from the client for this engagement. "Overdue" is computed live from the due date, not stored - it's always accurate. Only a human marks an item received or waived.</p>
+
+{% if reminder_draft %}
+<div class="exception-card severity-medium">
+    <div class="exception-head"><span class="badge">AI-drafted reminder email</span></div>
+    <p style="white-space: pre-wrap;">{{ reminder_draft }}</p>
+    <p class="subtle small">Drafted from the overdue items below only - copy, review, and send it yourself. This app never sends mail on your behalf.</p>
+</div>
+{% endif %}
+
+<h2>Open requests ({{ open_requests|length }})</h2>
+<table class="list">
+    <thead><tr><th>Item</th><th>Due</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody>
+    {% for r in open_requests %}
+        <tr>
+            <td>{{ r.item_name }}{% if r.description %}<div class="subtle small">{{ r.description }}</div>{% endif %}</td>
+            <td>{{ r.due_date.strftime("%Y-%m-%d") if r.due_date else "-" }}</td>
+            <td>{% if r.id in overdue_ids %}<span class="badge badge-failed">overdue</span>{% else %}<span class="badge">requested</span>{% endif %}</td>
+            <td>
+                <form method="post" action="/pbc/{{ r.id }}/receive" class="inline-form">
+                    <input type="text" name="resolved_by" placeholder="Your name" required style="width:100px">
+                    <select name="linked_document_id">
+                        <option value="">no linked document</option>
+                        {% for d in documents %}<option value="{{ d.id }}">{{ d.filename }}</option>{% endfor %}
+                    </select>
+                    <input type="text" name="resolution_note" placeholder="Note (optional)">
+                    <button type="submit">Mark received</button>
+                </form>
+                <form method="post" action="/pbc/{{ r.id }}/waive" class="inline-form">
+                    <input type="text" name="resolved_by" placeholder="Your name" required style="width:100px">
+                    <input type="text" name="resolution_note" placeholder="Why waived?" required>
+                    <button type="submit" class="secondary">Waive</button>
+                </form>
+            </td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">No open requests - add one below.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+{% if has_overdue %}
+<form method="post" action="/engagements/{{ engagement.id }}/pbc/draft-reminder">
+    <button type="submit">Draft reminder email for overdue items</button>
+</form>
+{% endif %}
+
+<h3>Request a new item</h3>
+<form method="post" action="/engagements/{{ engagement.id }}/pbc" class="inline-form">
+    <input type="text" name="item_name" placeholder="e.g. Q1 2026 bank statements" required>
+    <input type="text" name="description" placeholder="Description (optional)">
+    <input type="date" name="due_date">
+    <button type="submit">Add request</button>
+</form>
+
+<h2>Closed ({{ closed_requests|length }})</h2>
+<table class="list">
+    <thead><tr><th>Item</th><th>Status</th><th>Note</th><th>By</th></tr></thead>
+    <tbody>
+    {% for r in closed_requests %}
+        <tr>
+            <td>{{ r.item_name }}{% if r.linked_document %}<div class="subtle small">linked: {{ r.linked_document.filename }}</div>{% endif %}</td>
+            <td><span class="badge {{ 'badge-extracted' if r.status.value == 'received' else '' }}">{{ r.status.value }}</span></td>
+            <td>{{ r.resolution_note or "" }}</td>
+            <td>{{ r.resolved_by }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing closed yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
