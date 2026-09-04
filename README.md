@@ -25,7 +25,7 @@ Beyond that original 5-phase roadmap, four more pieces have since been
 added: **real user accounts** (signup/login/logout) replacing the
 typed-name fields the five phases originally used for "who did this";
 **vision extraction** for scanned documents and photos; the
-**Anomaly / Fraud-Risk Detection Agent**; and the **Audit Finding
+**Anomaly / Fraud-Risk Detection engine**; and the **Audit Finding
 Assistant**, both below. A later, more detailed revision of the
 requirements document named 12 specific agents in total (not just the
 5 phases) - as of the finding assistant, **6 of those 12 are built**:
@@ -159,12 +159,15 @@ longer be attributed to a name someone else typed. Historical records
 created before this feature still show generic actors like `"human"`
 - an honest gap, not rewritten after the fact.
 
-**Anomaly / Fraud-Risk Detection Agent.** A third independent
-deterministic engine ([`fraud_risk_service.py`](app/services/fraud_risk_service.py)),
-same discipline as reconciliation and controls testing - zero LLM
-calls, plain pattern-matching over evidence already on file. The
-blueprint is explicit that this agent "should not automatically
-declare fraud," and this project's own history backs that up hard: a
+**Anomaly / Fraud-Risk Detection engine.** (Named "Anomaly / Fraud-Risk
+Detection Agent" in the blueprint's own 12-agent list - called an
+engine here instead, since it's zero-LLM plain code, not an AI making
+a decision.) A third independent deterministic engine
+([`fraud_risk_service.py`](app/services/fraud_risk_service.py)), same
+discipline as reconciliation and controls testing - zero LLM calls,
+plain pattern-matching over evidence already on file. The blueprint is
+explicit that this "should not automatically declare fraud," and this
+project's own history backs that up hard: a
 reasoning-model-based fraud feature in the sibling InvoiceIQ project
 was built, tested, and reverted twice for being too slow and too
 unreliable for exactly this kind of judgment call. Four heuristics
@@ -453,6 +456,6 @@ ten autonomous agents — start with one narrow, measurable workflow and
 make it reliable, secure, and explainable, then add capabilities in
 phases."* This repo is that recommendation, built one phase at a time -
 all five planned phases now complete, plus real authentication, vision
-extraction, the Anomaly/Fraud-Risk Detection Agent, and the Audit
+extraction, the Anomaly/Fraud-Risk Detection engine, and the Audit
 Finding Assistant added as follow-ups, 135 tests passing, every
 feature verified live against a real model, not just against mocks.

@@ -437,7 +437,7 @@ class OrchestrationStep(Base):
     engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
     step_order = Column(Integer, nullable=False)
-    agent_name = Column(String(100), nullable=False)  # e.g. "evidence_extraction_agent", "reconciliation_agent"
+    agent_name = Column(String(100), nullable=False)  # e.g. "evidence_extraction_step", "reconciliation_step" - column name kept as-is (a rename would need a schema migration), even though most of these steps are plain code, not an AI agent
     status = Column(Enum(OrchestrationStepStatus), nullable=False)
     detail = Column(Text, nullable=True)
     started_at = Column(DateTime, default=_now)
@@ -456,7 +456,7 @@ class AuditLogEntry(Base):
     id = Column(Integer, primary_key=True)
     engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=True, index=True)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=True, index=True)
-    actor = Column(String(100), nullable=False)  # e.g. "extraction_agent", "reconciliation_engine", or a person's name
+    actor = Column(String(100), nullable=False)  # e.g. "evidence_extraction_step", "reconciliation_step", "workpaper_service", or a person's name
     action = Column(String(100), nullable=False)  # e.g. "document_uploaded", "evidence_extracted", "exception_resolved"
     detail = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_now)

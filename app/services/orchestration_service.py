@@ -1,18 +1,23 @@
 """
-Phase 5 - coordination, not new judgment. Every agent this file calls
+Phase 5 - coordination, not new judgment. Every step this file calls
 already existed and already made its own deterministic or narrow-LLM
 decisions elsewhere (evidence extraction, reconciliation, fraud-risk
 detection, controls testing); this file's only job is calling them in
-the right order and writing down, step by step, that it did.
+the right order and writing down, step by step, that it did. Most of
+these steps run zero LLM calls at all - "step" on purpose, not "agent":
+see the individual functions' own docstrings for which ones are plain
+Python and which touch a model.
 
 This is the blueprint's own architecture diagram - Human Auditor ->
 Orchestrator -> testing agents -> Human Review - made real as code
-instead of staying a diagram. Before this phase, routes.py called
-these three functions directly, one after another, with no record of
-having done so beyond the audit log's prose lines. Now there is a
-persisted OrchestrationRun with ordered OrchestrationStep rows: which
-agent ran, in what order, with what outcome, how long it took - the
-full intended pipeline, including the steps that were correctly
+instead of staying a diagram (that diagram is the blueprint's own
+wording; this file's own naming deliberately doesn't borrow "agent"
+for logic that has no model in it at all). Before this phase, routes.py
+called these three functions directly, one after another, with no
+record of having done so beyond the audit log's prose lines. Now there
+is a persisted OrchestrationRun with ordered OrchestrationStep rows:
+which step ran, in what order, with what outcome, how long it took -
+the full intended pipeline, including the steps that were correctly
 SKIPPED, not just the ones that happened to execute.
 
 Deliberately excludes workpaper drafting and PBC reminders from this
@@ -20,7 +25,7 @@ pipeline. Both stay human-triggered "when I'm ready" actions (see
 Phase 3/4's own README notes) - automatically regenerating a workpaper
 after every single upload would silently overwrite an auditor's
 in-progress edits and burn a slow LLM call for no reason. Orchestration
-means running the RIGHT agents at the RIGHT time, not running
+means running the RIGHT steps at the RIGHT time, not running
 everything all the time.
 """
 
@@ -52,22 +57,22 @@ def _now() -> datetime:
 
 
 @dataclass
-class AgentStepOutcome:
+class StepOutcome:
     status: OrchestrationStepStatus
     detail: str
 
 
-# ------------------------------------------------------------------ agents
-# Each function below is one named agent - the exact same logic that
+# -------------------------------------------------------------------- steps
+# Each function below is one named step - the exact same logic that
 # used to live inline in routes.py, relocated here so it can be called
 # either as one step in an orchestrated run, or standalone (a control
 # created after evidence already exists only needs the controls-testing
-# agent to re-run, not a whole document pipeline).
+# step to re-run, not a whole document pipeline).
 
 _IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 
-def run_evidence_extraction_agent(db: Session, document: Document, engagement: Engagement) -> AgentStepOutcome:
+def run_evidence_extraction_step(db: Session, document: Document, engagement: Engagement) -> StepOutcome:
     """Three ways in, one way out. A directly-uploaded photo/screenshot
     (JPG/PNG) always goes straight to the vision model. A PDF tries its
     real text layer first (cheap, fast, no vision model needed); only
@@ -88,7 +93,7 @@ def run_evidence_extraction_agent(db: Session, document: Document, engagement: E
             document.status = DocumentStatus.FAILED
             document.failure_reason = "Could not read this file as an image."
             db.commit()
-            return AgentStepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
+            return StepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
         return _extract_from_image(db, document, engagement, image_bytes)
 
     try:
@@ -98,7 +103,7 @@ def run_evidence_extraction_agent(db: Session, document: Document, engagement: E
         document.status = DocumentStatus.FAILED
         document.failure_reason = "Could not read this file as a PDF."
         db.commit()
-        return AgentStepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
+        return StepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
 
     if has_extractable_text(text):
         document.raw_text = text
@@ -114,11 +119,11 @@ def run_evidence_extraction_agent(db: Session, document: Document, engagement: E
         document.status = DocumentStatus.FAILED
         document.failure_reason = "No text layer found, and could not render the page as an image either."
         db.commit()
-        return AgentStepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
+        return StepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
     return _extract_from_image(db, document, engagement, image_bytes)
 
 
-def _extract_from_text(db: Session, document: Document, engagement: Engagement, text: str) -> AgentStepOutcome:
+def _extract_from_text(db: Session, document: Document, engagement: Engagement, text: str) -> StepOutcome:
     try:
         extracted = extract_evidence(text)
     except LLMUnavailableError as e:
@@ -126,7 +131,7 @@ def _extract_from_text(db: Session, document: Document, engagement: Engagement, 
     return _save_extracted_evidence(db, document, engagement, extracted)
 
 
-def _extract_from_image(db: Session, document: Document, engagement: Engagement, image_bytes: bytes) -> AgentStepOutcome:
+def _extract_from_image(db: Session, document: Document, engagement: Engagement, image_bytes: bytes) -> StepOutcome:
     try:
         extracted = extract_evidence_from_image(image_bytes)
     except LLMUnavailableError as e:
@@ -134,18 +139,18 @@ def _extract_from_image(db: Session, document: Document, engagement: Engagement,
     return _save_extracted_evidence(db, document, engagement, extracted)
 
 
-def _fail_extraction(db: Session, document: Document, engagement: Engagement, reason: str) -> AgentStepOutcome:
+def _fail_extraction(db: Session, document: Document, engagement: Engagement, reason: str) -> StepOutcome:
     document.status = DocumentStatus.FAILED
     document.failure_reason = reason
     db.commit()
     audit_log_service.log(
-        db, actor="evidence_extraction_agent", action="extraction_failed", detail=reason,
+        db, actor="evidence_extraction_step", action="extraction_failed", detail=reason,
         engagement_id=engagement.id, client_id=engagement.client_id,
     )
-    return AgentStepOutcome(OrchestrationStepStatus.FAILED, reason)
+    return StepOutcome(OrchestrationStepStatus.FAILED, reason)
 
 
-def _save_extracted_evidence(db: Session, document: Document, engagement: Engagement, extracted) -> AgentStepOutcome:
+def _save_extracted_evidence(db: Session, document: Document, engagement: Engagement, extracted) -> StepOutcome:
     try:
         doc_type = DocumentType(extracted.doc_type)
     except ValueError:
@@ -167,16 +172,16 @@ def _save_extracted_evidence(db: Session, document: Document, engagement: Engage
 
     detail = f"{doc_type.value} ref={extracted.reference_number} amount={extracted.amount}"
     audit_log_service.log(
-        db, actor="evidence_extraction_agent", action="evidence_extracted", detail=detail,
+        db, actor="evidence_extraction_step", action="evidence_extracted", detail=detail,
         engagement_id=engagement.id, client_id=engagement.client_id,
     )
-    return AgentStepOutcome(OrchestrationStepStatus.SUCCESS, detail)
+    return StepOutcome(OrchestrationStepStatus.SUCCESS, detail)
 
 
-def run_reconciliation_agent(db: Session, engagement: Engagement) -> AgentStepOutcome:
+def run_reconciliation_step(db: Session, engagement: Engagement) -> StepOutcome:
     records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
     if not records:
-        return AgentStepOutcome(OrchestrationStepStatus.SKIPPED, "No evidence records to reconcile yet.")
+        return StepOutcome(OrchestrationStepStatus.SKIPPED, "No evidence records to reconcile yet.")
 
     evidence_like = [
         EvidenceLike(
@@ -210,13 +215,13 @@ def run_reconciliation_agent(db: Session, engagement: Engagement) -> AgentStepOu
 
     detail = f"{len(results)} exceptions found, {new_count} new"
     audit_log_service.log(
-        db, actor="reconciliation_agent", action="reconciliation_run", detail=detail,
+        db, actor="reconciliation_step", action="reconciliation_run", detail=detail,
         engagement_id=engagement.id, client_id=engagement.client_id,
     )
-    return AgentStepOutcome(OrchestrationStepStatus.SUCCESS, detail)
+    return StepOutcome(OrchestrationStepStatus.SUCCESS, detail)
 
 
-def run_fraud_risk_agent(db: Session, engagement: Engagement) -> AgentStepOutcome:
+def run_fraud_risk_step(db: Session, engagement: Engagement) -> StepOutcome:
     """Deterministic pattern-matching only - see fraud_risk_service.py's
     own module docstring for why this deliberately never calls an LLM.
     Same re-run-everything-every-time + dedup-by-key approach as
@@ -226,7 +231,7 @@ def run_fraud_risk_agent(db: Session, engagement: Engagement) -> AgentStepOutcom
     human already resolved or dismissed."""
     records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
     if not records:
-        return AgentStepOutcome(OrchestrationStepStatus.SKIPPED, "No evidence records to assess yet.")
+        return StepOutcome(OrchestrationStepStatus.SKIPPED, "No evidence records to assess yet.")
 
     evidence_like = [
         fraud_risk_service.EvidenceLike(
@@ -256,16 +261,16 @@ def run_fraud_risk_agent(db: Session, engagement: Engagement) -> AgentStepOutcom
 
     detail = f"{len(results)} risk signals found, {new_count} new"
     audit_log_service.log(
-        db, actor="fraud_risk_agent", action="fraud_risk_run", detail=detail,
+        db, actor="fraud_risk_step", action="fraud_risk_run", detail=detail,
         engagement_id=engagement.id, client_id=engagement.client_id,
     )
-    return AgentStepOutcome(OrchestrationStepStatus.SUCCESS, detail)
+    return StepOutcome(OrchestrationStepStatus.SUCCESS, detail)
 
 
-def run_controls_testing_agent(db: Session, engagement: Engagement) -> AgentStepOutcome:
+def run_controls_testing_step(db: Session, engagement: Engagement) -> StepOutcome:
     active_controls = db.query(Control).filter(Control.engagement_id == engagement.id, Control.active == "active").all()
     if not active_controls:
-        return AgentStepOutcome(OrchestrationStepStatus.SKIPPED, "No active controls defined for this engagement yet.")
+        return StepOutcome(OrchestrationStepStatus.SKIPPED, "No active controls defined for this engagement yet.")
 
     records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
     control_like = [
@@ -294,7 +299,7 @@ def run_controls_testing_agent(db: Session, engagement: Engagement) -> AgentStep
             control_id=result.control_id, engagement_id=engagement.id, client_id=engagement.client_id,
             evidence_record_id=result.evidence_record_id, result=ControlTestStatus(result.result), detail=result.detail,
             status=ExceptionStatus.RESOLVED if is_pass else ExceptionStatus.OPEN,
-            resolved_by="controls_testing_agent" if is_pass else None,
+            resolved_by="controls_testing_step" if is_pass else None,
             resolution_note="Passed automatically - evidence satisfies the control." if is_pass else None,
         ))
         new_pass += 1 if is_pass else 0
@@ -303,21 +308,21 @@ def run_controls_testing_agent(db: Session, engagement: Engagement) -> AgentStep
 
     detail = f"{len(results)} results ({new_pass} new pass, {new_fail} new fail)"
     audit_log_service.log(
-        db, actor="controls_testing_agent", action="controls_testing_run", detail=detail,
+        db, actor="controls_testing_step", action="controls_testing_run", detail=detail,
         engagement_id=engagement.id, client_id=engagement.client_id,
     )
-    return AgentStepOutcome(OrchestrationStepStatus.SUCCESS, detail)
+    return StepOutcome(OrchestrationStepStatus.SUCCESS, detail)
 
 
 # ------------------------------------------------------------- orchestrator
 
-def _execute_step(db: Session, run: OrchestrationRun, step_order: int, agent_name: str, fn: Callable, *args) -> AgentStepOutcome:
+def _execute_step(db: Session, run: OrchestrationRun, step_order: int, agent_name: str, fn: Callable, *args) -> StepOutcome:
     started = _now()
     try:
         outcome = fn(*args)
-    except Exception as e:  # belt-and-suspenders - each agent already handles its own known failure modes
+    except Exception as e:  # belt-and-suspenders - each step already handles its own known failure modes
         logger.exception("Orchestration step %s failed unexpectedly", agent_name)
-        outcome = AgentStepOutcome(OrchestrationStepStatus.FAILED, f"Unexpected error: {e}")
+        outcome = StepOutcome(OrchestrationStepStatus.FAILED, f"Unexpected error: {e}")
     completed = _now()
     db.add(OrchestrationStep(
         run_id=run.id, engagement_id=run.engagement_id, client_id=run.client_id,
@@ -351,17 +356,17 @@ def run_document_pipeline(db: Session, document: Document, engagement: Engagemen
     db.add(run)
     db.commit()
 
-    extraction_outcome = _execute_step(db, run, 1, "evidence_extraction_agent", run_evidence_extraction_agent, db, document, engagement)
+    extraction_outcome = _execute_step(db, run, 1, "evidence_extraction_step", run_evidence_extraction_step, db, document, engagement)
 
     if extraction_outcome.status == OrchestrationStepStatus.SUCCESS:
-        recon_outcome = _execute_step(db, run, 2, "reconciliation_agent", run_reconciliation_agent, db, engagement)
-        fraud_outcome = _execute_step(db, run, 3, "fraud_risk_agent", run_fraud_risk_agent, db, engagement)
-        controls_outcome = _execute_step(db, run, 4, "controls_testing_agent", run_controls_testing_agent, db, engagement)
+        recon_outcome = _execute_step(db, run, 2, "reconciliation_step", run_reconciliation_step, db, engagement)
+        fraud_outcome = _execute_step(db, run, 3, "fraud_risk_step", run_fraud_risk_step, db, engagement)
+        controls_outcome = _execute_step(db, run, 4, "controls_testing_step", run_controls_testing_step, db, engagement)
         failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, fraud_outcome.status, controls_outcome.status)
     else:
-        _skip_step(db, run, 2, "reconciliation_agent", "Skipped - evidence extraction did not succeed.")
-        _skip_step(db, run, 3, "fraud_risk_agent", "Skipped - evidence extraction did not succeed.")
-        _skip_step(db, run, 4, "controls_testing_agent", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 2, "reconciliation_step", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 3, "fraud_risk_step", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 4, "controls_testing_step", "Skipped - evidence extraction did not succeed.")
         failed = extraction_outcome.status == OrchestrationStepStatus.FAILED
 
     run.status = OrchestrationRunStatus.FAILED if failed else OrchestrationRunStatus.COMPLETED
@@ -388,9 +393,9 @@ def run_full_engagement_check(db: Session, engagement: Engagement, triggered_by:
     db.add(run)
     db.commit()
 
-    recon_outcome = _execute_step(db, run, 1, "reconciliation_agent", run_reconciliation_agent, db, engagement)
-    fraud_outcome = _execute_step(db, run, 2, "fraud_risk_agent", run_fraud_risk_agent, db, engagement)
-    controls_outcome = _execute_step(db, run, 3, "controls_testing_agent", run_controls_testing_agent, db, engagement)
+    recon_outcome = _execute_step(db, run, 1, "reconciliation_step", run_reconciliation_step, db, engagement)
+    fraud_outcome = _execute_step(db, run, 2, "fraud_risk_step", run_fraud_risk_step, db, engagement)
+    controls_outcome = _execute_step(db, run, 3, "controls_testing_step", run_controls_testing_step, db, engagement)
     failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, fraud_outcome.status, controls_outcome.status)
 
     run.status = OrchestrationRunStatus.FAILED if failed else OrchestrationRunStatus.COMPLETED

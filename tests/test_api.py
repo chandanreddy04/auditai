@@ -514,10 +514,10 @@ def test_orchestration_flow(monkeypatch):
     resp = client.get(f"/engagements/{engagement.id}/orchestration")
     assert resp.status_code == 200
     assert "document_upload" in resp.text
-    assert "evidence_extraction_agent" in resp.text
-    assert "reconciliation_agent" in resp.text
-    assert "fraud_risk_agent" in resp.text
-    assert "controls_testing_agent" in resp.text
+    assert "evidence_extraction_step" in resp.text
+    assert "reconciliation_step" in resp.text
+    assert "fraud_risk_step" in resp.text
+    assert "controls_testing_step" in resp.text
 
     db = SessionLocal()
     run = db.query(OrchestrationRun).filter(OrchestrationRun.engagement_id == engagement.id).first()

@@ -430,7 +430,7 @@ def create_control(
         detail=f"{control.name} ({control.rule_type.value}, threshold={control.threshold_amount:,.2f})",
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
-    orchestration_service.run_controls_testing_agent(db, engagement)
+    orchestration_service.run_controls_testing_step(db, engagement)
     return RedirectResponse(url=f"/engagements/{engagement_id}/controls", status_code=303)
 
 
