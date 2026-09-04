@@ -175,6 +175,18 @@ review queue as every other flag in this app.
 
 ## Known limitations (found via live testing, not yet fixed)
 
+- **Groq's free tier has a daily request quota (1,000/day), separate
+  from its per-minute rate limit.** Found live: after a day of heavy
+  testing (deployment checks, vision extraction, fraud-risk agent),
+  the deployed site started returning `429 Rate limit reached ...
+  RPD: Limit 1000, Used 1000` on every AI extraction call - the
+  service itself was healthy and responding (`/health` returned 200
+  the whole time), only the LLM call was blocked. Same
+  `LLMUnavailableError` handling as any other LLM outage: the step
+  fails cleanly, downstream steps are correctly skipped, nothing
+  crashes or corrupts data. The quota resets on Groq's own schedule;
+  there's no in-app workaround (a paid Groq tier, or switching back to
+  local Ollama, are the two real options if this needs to not happen).
 - **A fraud-risk flag's wording can go stale.** Flags are never
   auto-retracted, same "only a human closes it" discipline as every
   other flag in this app - but that means if a "this vendor only
