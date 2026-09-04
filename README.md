@@ -224,12 +224,37 @@ session with it).
 ## Deploying it
 
 [`render.yaml`](render.yaml) + [`Dockerfile`](Dockerfile) deploy this
-app plus a free Postgres database on [Render](https://render.com), the
-exact same shape already proven out and live-deployed for InvoiceIQ
-(this app's sibling project): New + → Blueprint → connect this repo →
-Render reads `render.yaml` automatically. `SECRET_KEY` is generated for
-you; `DATABASE_URL` is wired to the attached Postgres database
-automatically - never set either by hand on Render.
+app as a web service on [Render](https://render.com): New + → Blueprint
+→ connect this repo → Render reads `render.yaml` automatically.
+`SECRET_KEY` is generated for you automatically.
+
+**Database - a deliberate deviation from InvoiceIQ's Blueprint.**
+Render's free tier allows only one free Postgres instance per account,
+and InvoiceIQ (this app's sibling project, deployed on the same
+account) already has it. Rather than pay for a second instance,
+`render.yaml` does NOT declare its own database - it reuses InvoiceIQ's
+existing free Postgres *server* with a second, completely separate
+`auditai` database created on it. Real data isolation (a totally
+different database, not a shared schema - InvoiceIQ and AuditAI even
+both happen to have a `users` table, so sharing one database would
+genuinely break things, not just be messy), zero extra cost. One-time
+setup after the first deploy:
+
+1. In the Render dashboard, open InvoiceIQ's Postgres instance → **Connect**
+   → copy the **External Connection String**.
+2. In your own terminal (not here - this connection string includes a
+   password): `psql "<that connection string>" -c "CREATE DATABASE auditai;"`
+3. Take that same connection string and change the database name at
+   the end from `/invoiceiq` to `/auditai` - that's AuditAI's own
+   `DATABASE_URL`.
+4. In AuditAI's Render service → **Environment** tab, set `DATABASE_URL`
+   to that value. Render redeploys automatically.
+
+Until step 4 is done, the app falls back to a local SQLite file inside
+the container and still starts and passes its health check - it just
+won't persist data across restarts, since Render's free web services
+have no persistent disk. Postgres via the steps above is what makes
+data actually survive a redeploy.
 
 The deployed app works fully (client/engagement management, uploads,
 all five review queues, dashboards) with **no LLM at all** by default -
@@ -241,7 +266,11 @@ environment variable in the Render dashboard after the first deploy
 (`sync: false` in `render.yaml` means Render prompts for it
 interactively rather than expecting it committed to the repo) - see
 [`app/services/llm_client.py`](app/services/llm_client.py) for the
-backend switch this triggers.
+backend switch this triggers. Use a **separate** Groq key from
+InvoiceIQ's, not the same one - Groq's free-tier rate limit is per key,
+so sharing one means heavy usage (or a bug) in either app can throttle
+the other, and separate keys make usage/debugging independent in
+Groq's own dashboard.
 
 Verified locally before ever deploying: the `postgres://` → `postgresql://`
 URL rewrite `config.py` needs for Render's Postgres connection strings,

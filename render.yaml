@@ -1,7 +1,16 @@
-# Render Blueprint - deploys the app + a free Postgres database
-# together. On Render: New + -> Blueprint -> connect this repo -> it
-# reads this file automatically. Same shape already proven out and
-# live-deployed for InvoiceIQ (this app's sibling project).
+# Render Blueprint - deploys the app as a web service. On Render:
+# New + -> Blueprint -> connect this repo -> it reads this file
+# automatically. Same shape already proven out and live-deployed for
+# InvoiceIQ (this app's sibling project), MINUS a `databases:` block -
+# Render's free tier allows only one free Postgres instance per
+# account, and InvoiceIQ already has it. Rather than pay for a second
+# instance, AuditAI reuses that same Postgres SERVER with its own
+# separate `auditai` database on it (a plain `CREATE DATABASE auditai;`
+# run once against InvoiceIQ's existing instance) - genuinely isolated
+# data, zero extra cost. See README's "Deploying it" section for the
+# exact one-time setup steps. DATABASE_URL is therefore NOT wired via
+# `fromDatabase` here; it's a manually-set secret (sync: false) pointing
+# at that separate database on the shared server.
 #
 # What this does NOT do: run Ollama. Free tiers don't have the RAM for
 # it. The deployed app works fully for client/engagement management,
@@ -12,12 +21,6 @@
 # set below, in which case the app uses Groq's free-tier hosted API
 # instead of a local model - see app/services/llm_client.py.
 
-databases:
-  - name: auditai-db
-    plan: free
-    databaseName: auditai
-    user: auditai
-
 services:
   - type: web
     name: auditai
@@ -26,16 +29,20 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
+      # Set this manually in the Render dashboard after the first
+      # deploy: take InvoiceIQ's Postgres external connection string
+      # and swap the trailing database name from /invoiceiq to
+      # /auditai (after creating that database on the same server -
+      # see README). Never commit a real connection string here.
       - key: DATABASE_URL
-        fromDatabase:
-          name: auditai-db
-          property: connectionString
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       # Optional. Leave unset to keep the cloud deployment LLM-free (the
       # default, always free). Get a free key at https://console.groq.com/keys
-      # and paste it into the Render dashboard - sync: false means Render
-      # will prompt for it interactively rather than expecting a value here,
-      # so it's never committed to the repo.
+      # (a SEPARATE key from InvoiceIQ's - see the two apps' independent
+      # rate limits/quota) and paste it into the Render dashboard -
+      # sync: false means Render will prompt for it interactively rather
+      # than expecting a value here, so it's never committed to the repo.
       - key: GROQ_API_KEY
         sync: false
