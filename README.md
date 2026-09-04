@@ -221,6 +221,35 @@ signs the session cookie, and the fallback value in `config.py` is
 intentionally insecure (anyone who reads the source could forge a
 session with it).
 
+## Deploying it
+
+[`render.yaml`](render.yaml) + [`Dockerfile`](Dockerfile) deploy this
+app plus a free Postgres database on [Render](https://render.com), the
+exact same shape already proven out and live-deployed for InvoiceIQ
+(this app's sibling project): New + → Blueprint → connect this repo →
+Render reads `render.yaml` automatically. `SECRET_KEY` is generated for
+you; `DATABASE_URL` is wired to the attached Postgres database
+automatically - never set either by hand on Render.
+
+The deployed app works fully (client/engagement management, uploads,
+all five review queues, dashboards) with **no LLM at all** by default -
+every AI-touching step falls back to its documented "LLM unavailable"
+behavior rather than failing silently. To enable AI extraction,
+workpaper drafting, and PBC reminders in the cloud, add a free
+[Groq API key](https://console.groq.com/keys) as the `GROQ_API_KEY`
+environment variable in the Render dashboard after the first deploy
+(`sync: false` in `render.yaml` means Render prompts for it
+interactively rather than expecting it committed to the repo) - see
+[`app/services/llm_client.py`](app/services/llm_client.py) for the
+backend switch this triggers.
+
+Verified locally before ever deploying: the `postgres://` → `postgresql://`
+URL rewrite `config.py` needs for Render's Postgres connection strings,
+and the app starting cleanly bound to `0.0.0.0` on a `PORT` environment
+variable (exactly how the Dockerfile's `CMD` and Render's runtime both
+invoke it) with a real production-style `SECRET_KEY` - not the Docker
+build itself, since this machine doesn't have Docker installed.
+
 ## Tests
 
 ```bash
@@ -279,6 +308,8 @@ app/
     auth_routes.py                   signup/login/logout + get_current_user dependency
     routes.py                        the whole app, wired together
 tests/
+Dockerfile                            container image, used both locally and by render.yaml
+render.yaml                           Render Blueprint: web service + free Postgres, one click
 ```
 
 ## Where this came from

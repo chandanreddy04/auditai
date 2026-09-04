@@ -18,6 +18,15 @@ DATA_DIR.mkdir(exist_ok=True)
 
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'auditai.db'}")
 
+# Render (and Heroku-style) managed Postgres hand out connection
+# strings starting "postgres://" - the legacy scheme. SQLAlchemy 1.4+
+# requires "postgresql://" and raises on the old one. Rewriting it
+# here means the exact connection string a cloud provider gives you
+# can be pasted into DATABASE_URL verbatim, no manual editing needed -
+# same fix already proven necessary and applied in InvoiceIQ's config.py.
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 # Local-first: Ollama on localhost, no key needed. Setting GROQ_API_KEY
 # switches every LLM call in the app to Groq's hosted free tier instead -
 # same dual-backend pattern already proven out and load-tested in

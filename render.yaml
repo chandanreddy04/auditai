@@ -1,0 +1,41 @@
+# Render Blueprint - deploys the app + a free Postgres database
+# together. On Render: New + -> Blueprint -> connect this repo -> it
+# reads this file automatically. Same shape already proven out and
+# live-deployed for InvoiceIQ (this app's sibling project).
+#
+# What this does NOT do: run Ollama. Free tiers don't have the RAM for
+# it. The deployed app works fully for client/engagement management,
+# uploads, review queues, dashboards, etc. without any LLM at all;
+# every AI-touching step (evidence extraction, workpaper drafting, PBC
+# reminders) falls back to its existing "LLM unavailable" behavior (see
+# each service's LLMUnavailableError handling) unless GROQ_API_KEY is
+# set below, in which case the app uses Groq's free-tier hosted API
+# instead of a local model - see app/services/llm_client.py.
+
+databases:
+  - name: auditai-db
+    plan: free
+    databaseName: auditai
+    user: auditai
+
+services:
+  - type: web
+    name: auditai
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: auditai-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      # Optional. Leave unset to keep the cloud deployment LLM-free (the
+      # default, always free). Get a free key at https://console.groq.com/keys
+      # and paste it into the Render dashboard - sync: false means Render
+      # will prompt for it interactively rather than expecting a value here,
+      # so it's never committed to the repo.
+      - key: GROQ_API_KEY
+        sync: false
