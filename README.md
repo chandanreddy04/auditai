@@ -21,9 +21,18 @@ Phase 4: PBC / request tracking                                                 
 Phase 5: multi-agent orchestration across all of the above                                                [done]
 ```
 
-Beyond that original roadmap, one more piece has since been added:
-**real user accounts** (signup/login/logout) replacing the typed-name
-fields the five phases originally used for "who did this."
+Beyond that original 5-phase roadmap, three more pieces have since been
+added: **real user accounts** (signup/login/logout) replacing the
+typed-name fields the five phases originally used for "who did this";
+**vision extraction** for scanned documents and photos; and the
+**Anomaly / Fraud-Risk Detection Agent** below. A later, more detailed
+revision of the requirements document named 12 specific agents in
+total (not just the 5 phases) - as of the fraud-risk agent, **5 of
+those 12 are built**: Evidence Extraction, Reconciliation, Controls
+Testing, Workpaper Drafting, and now Anomaly/Fraud-Risk Detection. The
+other 7 (Transaction Testing, Policy/Knowledge (RAG), Audit Finding
+Assistant, Follow-up/Remediation, Auditor Research Copilot, and full
+Document Intake / PBC lifecycles) are not built yet.
 
 ## Why it's built this way
 
@@ -147,7 +156,36 @@ longer be attributed to a name someone else typed. Historical records
 created before this feature still show generic actors like `"human"`
 - an honest gap, not rewritten after the fact.
 
+**Anomaly / Fraud-Risk Detection Agent.** A third independent
+deterministic engine ([`fraud_risk_service.py`](app/services/fraud_risk_service.py)),
+same discipline as reconciliation and controls testing - zero LLM
+calls, plain pattern-matching over evidence already on file. The
+blueprint is explicit that this agent "should not automatically
+declare fraud," and this project's own history backs that up hard: a
+reasoning-model-based fraud feature in the sibling InvoiceIQ project
+was built, tested, and reverted twice for being too slow and too
+unreliable for exactly this kind of judgment call. Four heuristics
+run automatically after every upload (and on a manual "run full
+check"): a vendor billed the same amount twice under different
+reference numbers (duplicate payment risk), a suspiciously round total,
+a weekend-dated document, and a vendor's only appearance in the
+engagement above a materiality threshold. Every flag is a prompt for a
+human to look closer, never a conclusion, and sits in the same kind of
+review queue as every other flag in this app.
+
 ## Known limitations (found via live testing, not yet fixed)
+
+- **A fraud-risk flag's wording can go stale.** Flags are never
+  auto-retracted, same "only a human closes it" discipline as every
+  other flag in this app - but that means if a "this vendor only
+  appears once" flag was raised, then a *second* document for that
+  same vendor arrives later, the original flag stays open with its
+  now-slightly-inaccurate wording rather than being reconsidered.
+  Found live: uploading two invoices for the same new vendor in
+  sequence left an earlier "appears only once" flag open after a
+  second one made that literally no longer true. The underlying
+  concern (a human should glance at this vendor) is still reasonable
+  to keep open; the description text just doesn't update itself.
 
 - **Reconciliation compares invoice-to-PO amounts 1:1.** A single
   purchase order legitimately billed across multiple invoices (partial
@@ -295,18 +333,19 @@ pytest
 ```
 
 `test_reconciliation_service.py`, `test_controls_testing_service.py`,
-`test_pbc_service.py`, and the summary-building half of
-`test_workpaper_service.py` cover the four decision/summary engines
-with zero LLM calls — pure input/output, deterministic, fast.
-`test_orchestration_service.py` covers the coordination logic itself
-(step ordering, skip-on-failure, run-status rollup) with the LLM-touching
-extraction call mocked. `test_api.py` exercises the full route flow
-(clients, engagements, uploads, exceptions, controls, workpaper
-generate/edit/finalize, PBC requests/receive/waive/reminder,
-orchestration runs/manual full-check) end to end against a throwaway
-SQLite database. `test_evidence_extraction_service.py` and the drafting
-halves of `test_workpaper_service.py`/`test_pbc_service.py` cover
-LLM-touching code with the model call mocked.
+`test_fraud_risk_service.py`, `test_pbc_service.py`, and the
+summary-building half of `test_workpaper_service.py` cover the five
+decision/summary engines with zero LLM calls — pure input/output,
+deterministic, fast. `test_orchestration_service.py` covers the
+coordination logic itself (step ordering, skip-on-failure, run-status
+rollup) with the LLM-touching extraction call mocked. `test_api.py`
+exercises the full route flow (clients, engagements, uploads,
+exceptions, fraud-risk flags, controls, workpaper generate/edit/finalize,
+PBC requests/receive/waive/reminder, orchestration runs/manual
+full-check) end to end against a throwaway SQLite database.
+`test_evidence_extraction_service.py` and the drafting halves of
+`test_workpaper_service.py`/`test_pbc_service.py` cover LLM-touching
+code with the model call mocked.
 
 `test_auth_service.py` covers password hashing (zero LLM, zero HTTP).
 `test_auth_routes.py` covers signup/login/logout and the
@@ -336,8 +375,8 @@ app/
   core/config.py                     settings, one seam for the environment
   models/models.py                   User, Client, Engagement, Document, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
-                                      Workpaper, PBCRequest, OrchestrationRun,
-                                      OrchestrationStep, AuditLogEntry
+                                      Workpaper, PBCRequest, FraudRiskFlag,
+                                      OrchestrationRun, OrchestrationStep, AuditLogEntry
   database/session.py                engine, session factory, get_db()
   schemas/extraction.py              the schema the LLM's output is constrained to
   services/
@@ -347,6 +386,7 @@ app/
     evidence_extraction_service.py   LLM (text or vision): document -> structured evidence
     reconciliation_service.py        deterministic: Phase 1's decision engine
     controls_testing_service.py      deterministic: Phase 2's decision engine
+    fraud_risk_service.py            deterministic: pattern-based risk-flag engine, zero LLM
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
     pbc_service.py                   deterministic overdue calc + Phase 4's one LLM call
     orchestration_service.py         Phase 5: coordinates the agents above, logs every step
@@ -369,6 +409,7 @@ own recommendation was followed literally: *"do not begin by building
 ten autonomous agents — start with one narrow, measurable workflow and
 make it reliable, secure, and explainable, then add capabilities in
 phases."* This repo is that recommendation, built one phase at a time -
-all five planned phases now complete, plus real authentication added
-as a follow-up, 85 tests passing, every feature verified live against
-a real local model, not just against mocks.
+all five planned phases now complete, plus real authentication, vision
+extraction, and the Anomaly/Fraud-Risk Detection Agent added as
+follow-ups, 120 tests passing, every feature verified live against a
+real model, not just against mocks.

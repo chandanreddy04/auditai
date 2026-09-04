@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Fraud Risk - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Fraud risk</p>
+<h1>Fraud-risk flags</h1>
+<p class="subtle">
+    Every flag here is a plain pattern in the evidence - a duplicate amount, a round number, a weekend date, a
+    brand-new vendor - never an AI judgment call, and never an accusation. A flag means "worth a second look,"
+    nothing more. Only a human resolves or dismisses one.
+</p>
+
+<h2>Open ({{ open_flags|length }})</h2>
+{% for flag in open_flags %}
+<div class="exception-card severity-{{ flag.severity }}">
+    <div class="exception-head">
+        <span class="badge">{{ flag.flag_type.value }}</span>
+        <span class="badge severity-badge">{{ flag.severity }}</span>
+    </div>
+    <p>{{ flag.description }}</p>
+    <p class="subtle small">Evidence record IDs: {{ flag.evidence_record_ids }}</p>
+    <form method="post" action="/fraud-risk-flags/{{ flag.id }}/resolve" class="inline-form">
+        <input type="text" name="resolution_note" placeholder="Resolution note (what did you find?)">
+        <button type="submit" name="action" value="resolved">Resolve</button>
+        <button type="submit" name="action" value="dismissed" class="secondary">Dismiss (false positive)</button>
+    </form>
+</div>
+{% else %}
+<p class="empty">No open fraud-risk flags - nothing unusual found so far.</p>
+{% endfor %}
+
+<h2>Recently closed</h2>
+<table class="list">
+    <thead><tr><th>Type</th><th>Description</th><th>Closed by</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for flag in closed_flags %}
+        <tr>
+            <td><span class="badge">{{ flag.flag_type.value }}</span> <span class="subtle small">{{ flag.status.value }}</span></td>
+            <td>{{ flag.description }}</td>
+            <td>{{ flag.resolved_by }}</td>
+            <td>{{ flag.resolution_note }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing closed yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

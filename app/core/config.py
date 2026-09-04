@@ -51,6 +51,16 @@ RECONCILIATION_AMOUNT_TOLERANCE = float(os.getenv("RECONCILIATION_AMOUNT_TOLERAN
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Fraud-risk heuristic thresholds (fraud_risk_service.py) - deliberately
+# plain, adjustable numbers, not learned/tuned values. A round-dollar
+# amount below this is too common to be worth flagging (a $20 round
+# number means nothing; a $10,000 one is worth a second look). A new
+# vendor's first-ever transaction below this is unremarkable; above it,
+# worth confirming the vendor is legitimate before the relationship goes
+# further.
+ROUND_DOLLAR_MIN_AMOUNT = float(os.getenv("ROUND_DOLLAR_MIN_AMOUNT", "1000.00"))
+NEW_VENDOR_AMOUNT_THRESHOLD = float(os.getenv("NEW_VENDOR_AMOUNT_THRESHOLD", "5000.00"))
+
 # Signs the session cookie (see app/web/auth_routes.py). The fallback is
 # fine for local dev only - anyone who reads it could forge a session
 # cookie, so a real deployment MUST set SECRET_KEY in the environment.

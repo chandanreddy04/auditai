@@ -302,6 +302,43 @@ class PBCRequest(Base):
     linked_document = relationship("Document")
 
 
+class FraudFlagType(str, enum.Enum):
+    """Each value maps to one deterministic heuristic in
+    fraud_risk_service.py - plain pattern-matching over evidence already
+    on file, never an LLM call. The blueprint is explicit that this
+    agent "should not automatically declare fraud," and this project's
+    own history backs that up: a reasoning-model-based fraud feature in
+    the sibling InvoiceIQ project was tried and reverted twice for
+    being too slow and too unreliable. A flag here is a prompt for a
+    human to look closer - never a conclusion."""
+    DUPLICATE_PAYMENT_RISK = "duplicate_payment_risk"    # same vendor + same amount, different reference numbers
+    ROUND_DOLLAR_AMOUNT = "round_dollar_amount"          # a suspiciously exact, round total
+    WEEKEND_TRANSACTION = "weekend_transaction"          # dated a Saturday or Sunday
+    NEW_VENDOR_LARGE_AMOUNT = "new_vendor_large_amount"  # a vendor's only appearance, above a materiality threshold
+
+
+class FraudRiskFlag(Base):
+    """One risk signal the deterministic fraud_risk_service.py engine
+    found - not a finding, not an accusation, just a pattern worth a
+    human's attention. Reuses ExceptionStatus (open/resolved/dismissed)
+    for the exact same review-queue discipline as every other flag in
+    this app: only a named human closes one, never the engine itself."""
+    __tablename__ = "fraud_risk_flags"
+
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    flag_type = Column(Enum(FraudFlagType), nullable=False)
+    description = Column(Text, nullable=False)
+    evidence_record_ids = Column(String(200), nullable=True)  # comma-separated ids, same convention as ReconciliationException
+    severity = Column(String(20), default="medium")  # low, medium, high
+    status = Column(Enum(ExceptionStatus), default=ExceptionStatus.OPEN)
+    resolved_by = Column(String(200), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_now)
+    resolved_at = Column(DateTime, nullable=True)
+
+
 class OrchestrationTrigger(str, enum.Enum):
     DOCUMENT_UPLOAD = "document_upload"
     MANUAL = "manual"

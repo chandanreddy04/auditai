@@ -218,6 +218,71 @@ def test_workpaper_flow(monkeypatch):
     assert resp.status_code == 400
 
 
+def test_fraud_risk_flow():
+    from app.database.session import SessionLocal
+    from app.models.models import Client, Document, DocumentType, Engagement, EvidenceRecord, FraudRiskFlag
+
+    client.post("/clients", data={"name": "Fraud Risk Test Corp"}, follow_redirects=False)
+    db = SessionLocal()
+    acme = db.query(Client).filter(Client.name == "Fraud Risk Test Corp").first()
+    db.close()
+
+    client.post(
+        f"/clients/{acme.id}/engagements",
+        data={"name": "Fraud Risk Engagement", "audit_type": "financial"},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    engagement = db.query(Engagement).filter(Engagement.client_id == acme.id).first()
+    db.close()
+
+    # Seed one evidence record directly (bypassing the LLM) that should
+    # trip both round_dollar_amount and new_vendor_large_amount.
+    db = SessionLocal()
+    doc = Document(engagement_id=engagement.id, client_id=acme.id, filename="test_invoice.pdf", file_path="x")
+    db.add(doc)
+    db.commit()
+    record = EvidenceRecord(
+        document_id=doc.id, engagement_id=engagement.id, client_id=acme.id,
+        doc_type=DocumentType.INVOICE, vendor_name="Brand New Vendor Inc", reference_number="INV-999", amount=10000.0,
+    )
+    db.add(record)
+    db.commit()
+    db.close()
+
+    resp = client.post(f"/engagements/{engagement.id}/run-full-check", follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = client.get(f"/engagements/{engagement.id}/fraud-risk")
+    assert resp.status_code == 200
+    assert "Brand New Vendor Inc" in resp.text
+    assert "Open (2)" in resp.text
+
+    db = SessionLocal()
+    flag = db.query(FraudRiskFlag).filter(FraudRiskFlag.engagement_id == engagement.id, FraudRiskFlag.flag_type == "round_dollar_amount").first()
+    db.close()
+    assert flag is not None
+    assert flag.status.value == "open"
+
+    resp = client.post(
+        f"/fraud-risk-flags/{flag.id}/resolve",
+        data={"resolution_note": "Confirmed - a genuine round invoice, not an estimate.", "action": "resolved"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    resolved = db.get(FraudRiskFlag, flag.id)
+    db.close()
+    assert resolved.status.value == "resolved"
+    assert resolved.resolved_by == "Test Auditor"
+
+    resp = client.get(f"/engagements/{engagement.id}/fraud-risk")
+    assert "Open (1)" in resp.text
+    assert "Closed" in resp.text
+
+
 def test_pbc_flow(monkeypatch):
     from datetime import date, timedelta
 
@@ -353,6 +418,7 @@ def test_orchestration_flow(monkeypatch):
     assert "document_upload" in resp.text
     assert "evidence_extraction_agent" in resp.text
     assert "reconciliation_agent" in resp.text
+    assert "fraud_risk_agent" in resp.text
     assert "controls_testing_agent" in resp.text
 
     db = SessionLocal()
@@ -360,7 +426,7 @@ def test_orchestration_flow(monkeypatch):
     assert run is not None
     assert run.trigger.value == "document_upload"
     assert run.triggered_by == "orch_test.pdf"
-    assert len(run.steps) == 3
+    assert len(run.steps) == 4
     db.close()
 
     # Manual full-check trigger.
@@ -375,7 +441,7 @@ def test_orchestration_flow(monkeypatch):
     runs = db.query(OrchestrationRun).filter(OrchestrationRun.engagement_id == engagement.id).all()
     assert len(runs) == 2
     manual_run = [r for r in runs if r.trigger.value == "manual"][0]
-    assert len(manual_run.steps) == 2  # no extraction step for a manual re-check
+    assert len(manual_run.steps) == 3  # no extraction step for a manual re-check
     db.close()
 
 

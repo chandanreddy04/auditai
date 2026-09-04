@@ -34,7 +34,7 @@ def make_document(db, engagement, filename="test.pdf"):
     return doc
 
 
-def test_run_document_pipeline_success_runs_all_three_steps_in_order(monkeypatch):
+def test_run_document_pipeline_success_runs_all_four_steps_in_order(monkeypatch):
     db = SessionLocal()
     engagement = make_engagement(db)
     document = make_document(db, engagement)
@@ -50,12 +50,15 @@ def test_run_document_pipeline_success_runs_all_three_steps_in_order(monkeypatch
     assert run.trigger == OrchestrationTrigger.DOCUMENT_UPLOAD
     assert run.triggered_by == "test.pdf"
     assert run.status == OrchestrationRunStatus.COMPLETED
-    assert len(run.steps) == 3
-    assert [s.agent_name for s in run.steps] == ["evidence_extraction_agent", "reconciliation_agent", "controls_testing_agent"]
-    assert [s.step_order for s in run.steps] == [1, 2, 3]
+    assert len(run.steps) == 4
+    assert [s.agent_name for s in run.steps] == [
+        "evidence_extraction_agent", "reconciliation_agent", "fraud_risk_agent", "controls_testing_agent",
+    ]
+    assert [s.step_order for s in run.steps] == [1, 2, 3, 4]
     assert run.steps[0].status == OrchestrationStepStatus.SUCCESS
     assert run.steps[1].status == OrchestrationStepStatus.SUCCESS       # 1 evidence record now exists -> reconciliation runs
-    assert run.steps[2].status == OrchestrationStepStatus.SKIPPED       # no controls defined for this engagement
+    assert run.steps[2].status == OrchestrationStepStatus.SUCCESS       # fraud-risk always runs when evidence exists
+    assert run.steps[3].status == OrchestrationStepStatus.SKIPPED       # no controls defined for this engagement
 
     evidence = db.query(EvidenceRecord).filter(EvidenceRecord.document_id == document.id).first()
     assert evidence is not None
@@ -79,9 +82,9 @@ def test_run_document_pipeline_with_active_control_reports_success(monkeypatch):
     run = svc.run_document_pipeline(db, document, engagement)
 
     assert run.status == OrchestrationRunStatus.COMPLETED
-    assert run.steps[2].agent_name == "controls_testing_agent"
-    assert run.steps[2].status == OrchestrationStepStatus.SUCCESS
-    assert "1 results" in run.steps[2].detail
+    assert run.steps[3].agent_name == "controls_testing_agent"
+    assert run.steps[3].status == OrchestrationStepStatus.SUCCESS
+    assert "1 results" in run.steps[3].detail
     db.close()
 
 
@@ -100,10 +103,11 @@ def test_run_document_pipeline_extraction_failure_skips_downstream_steps(monkeyp
     run = svc.run_document_pipeline(db, document, engagement)
 
     assert run.status == OrchestrationRunStatus.FAILED
-    assert len(run.steps) == 3
+    assert len(run.steps) == 4
     assert run.steps[0].status == OrchestrationStepStatus.FAILED
     assert run.steps[1].status == OrchestrationStepStatus.SKIPPED
     assert run.steps[2].status == OrchestrationStepStatus.SKIPPED
+    assert run.steps[3].status == OrchestrationStepStatus.SKIPPED
     assert "extraction did not succeed" in run.steps[1].detail
     db.close()
 
@@ -179,7 +183,7 @@ def test_run_document_pipeline_image_upload_uses_vision_directly_not_pdf_text(mo
     db.close()
 
 
-def test_run_full_engagement_check_runs_two_steps(monkeypatch):
+def test_run_full_engagement_check_runs_three_steps(monkeypatch):
     db = SessionLocal()
     engagement = make_engagement(db)
     document = make_document(db, engagement)
@@ -193,8 +197,8 @@ def test_run_full_engagement_check_runs_two_steps(monkeypatch):
 
     assert run.trigger == OrchestrationTrigger.MANUAL
     assert run.triggered_by == "Test Auditor"
-    assert len(run.steps) == 2
-    assert [s.agent_name for s in run.steps] == ["reconciliation_agent", "controls_testing_agent"]
+    assert len(run.steps) == 3
+    assert [s.agent_name for s in run.steps] == ["reconciliation_agent", "fraud_risk_agent", "controls_testing_agent"]
     assert run.status == OrchestrationRunStatus.COMPLETED
     db.close()
 
@@ -204,6 +208,36 @@ def test_run_reconciliation_agent_skips_when_no_evidence():
     engagement = make_engagement(db)
     outcome = svc.run_reconciliation_agent(db, engagement)
     assert outcome.status == OrchestrationStepStatus.SKIPPED
+    db.close()
+
+
+def test_run_fraud_risk_agent_skips_when_no_evidence():
+    db = SessionLocal()
+    engagement = make_engagement(db)
+    outcome = svc.run_fraud_risk_agent(db, engagement)
+    assert outcome.status == OrchestrationStepStatus.SKIPPED
+    db.close()
+
+
+def test_run_fraud_risk_agent_reports_success_and_persists_flags():
+    db = SessionLocal()
+    engagement = make_engagement(db)
+    document = make_document(db, engagement)
+    db.add(EvidenceRecord(
+        document_id=document.id, engagement_id=engagement.id, client_id=engagement.client_id,
+        doc_type="invoice", vendor_name="Brand New Vendor", reference_number="INV-5", amount=10000.0,
+    ))
+    db.commit()
+
+    outcome = svc.run_fraud_risk_agent(db, engagement)
+    assert outcome.status == OrchestrationStepStatus.SUCCESS
+    # amount=10000.0 with a single-appearance vendor trips BOTH
+    # new_vendor_large_amount and round_dollar_amount on this one record.
+    assert "2 new" in outcome.detail
+
+    from app.models.models import FraudRiskFlag
+    flags = db.query(FraudRiskFlag).filter(FraudRiskFlag.engagement_id == engagement.id).all()
+    assert len(flags) == 2
     db.close()
 
 

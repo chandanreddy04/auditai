@@ -30,7 +30,7 @@ from app.core.config import UPLOAD_DIR
 from app.database.session import get_db
 from app.models.models import (
     Client, Control, ControlRuleType, ControlTestResult, Document,
-    Engagement, EvidenceRecord, ExceptionStatus, PBCRequest, PBCStatus,
+    Engagement, EvidenceRecord, ExceptionStatus, FraudRiskFlag, PBCRequest, PBCStatus,
     ReconciliationException, User, Workpaper, WorkpaperStatus,
 )
 from app.services import audit_log_service
@@ -120,13 +120,18 @@ def engagement_dashboard(
         .filter(ControlTestResult.engagement_id == engagement_id, ControlTestResult.status == ExceptionStatus.OPEN)
         .count()
     )
+    open_fraud_flags = (
+        db.query(FraudRiskFlag)
+        .filter(FraudRiskFlag.engagement_id == engagement_id, FraudRiskFlag.status == ExceptionStatus.OPEN)
+        .count()
+    )
     evidence_count = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement_id).count()
     return templates.TemplateResponse(
         "engagement_dashboard.html",
         {
             "request": request, "engagement": engagement, "documents": documents,
             "open_exceptions": open_exceptions, "open_control_failures": open_control_failures,
-            "evidence_count": evidence_count, "current_user": current_user,
+            "open_fraud_flags": open_fraud_flags, "evidence_count": evidence_count, "current_user": current_user,
         },
     )
 
@@ -209,6 +214,59 @@ def resolve_exception(
         engagement_id=exc.engagement_id, client_id=exc.client_id,
     )
     return RedirectResponse(url=f"/engagements/{exc.engagement_id}/exceptions", status_code=303)
+
+
+# ------------------------------------------------------------- fraud risk
+
+@router.get("/engagements/{engagement_id}/fraud-risk")
+def fraud_risk_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    engagement = _get_engagement_or_404(db, engagement_id)
+    open_flags = (
+        db.query(FraudRiskFlag)
+        .filter(FraudRiskFlag.engagement_id == engagement_id, FraudRiskFlag.status == ExceptionStatus.OPEN)
+        .order_by(FraudRiskFlag.created_at)
+        .all()
+    )
+    closed_flags = (
+        db.query(FraudRiskFlag)
+        .filter(FraudRiskFlag.engagement_id == engagement_id, FraudRiskFlag.status != ExceptionStatus.OPEN)
+        .order_by(FraudRiskFlag.resolved_at.desc())
+        .limit(20)
+        .all()
+    )
+    return templates.TemplateResponse(
+        "fraud_risk.html",
+        {
+            "request": request, "engagement": engagement, "open_flags": open_flags,
+            "closed_flags": closed_flags, "current_user": current_user,
+        },
+    )
+
+
+@router.post("/fraud-risk-flags/{flag_id}/resolve")
+def resolve_fraud_risk_flag(
+    flag_id: int, resolution_note: str = Form(""), action: str = Form("resolved"),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    flag = db.get(FraudRiskFlag, flag_id)
+    if flag is None:
+        raise HTTPException(404, "Fraud risk flag not found")
+
+    from datetime import datetime, timezone
+    flag.status = ExceptionStatus.RESOLVED if action == "resolved" else ExceptionStatus.DISMISSED
+    flag.resolved_by = current_user.name
+    flag.resolution_note = resolution_note.strip()
+    flag.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=current_user.name, action=f"fraud_risk_flag_{flag.status.value}",
+        detail=f"#{flag.id}: {resolution_note.strip()}",
+        engagement_id=flag.engagement_id, client_id=flag.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{flag.engagement_id}/fraud-risk", status_code=303)
 
 
 # ----------------------------------------------------------------- controls

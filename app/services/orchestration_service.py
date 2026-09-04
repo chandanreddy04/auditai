@@ -1,9 +1,9 @@
 """
 Phase 5 - coordination, not new judgment. Every agent this file calls
 already existed and already made its own deterministic or narrow-LLM
-decisions in Phases 1-2 (evidence extraction, reconciliation, controls
-testing); this file's only job is calling them in the right order and
-writing down, step by step, that it did.
+decisions elsewhere (evidence extraction, reconciliation, fraud-risk
+detection, controls testing); this file's only job is calling them in
+the right order and writing down, step by step, that it did.
 
 This is the blueprint's own architecture diagram - Human Auditor ->
 Orchestrator -> testing agents -> Human Review - made real as code
@@ -33,11 +33,12 @@ from sqlalchemy.orm import Session
 
 from app.models.models import (
     Control, ControlTestResult, ControlTestStatus, Document, DocumentStatus, DocumentType,
-    Engagement, EvidenceRecord, ExceptionStatus, OrchestrationRun, OrchestrationRunStatus,
+    Engagement, EvidenceRecord, ExceptionStatus, FraudRiskFlag, OrchestrationRun, OrchestrationRunStatus,
     OrchestrationStep, OrchestrationStepStatus, OrchestrationTrigger, ReconciliationException,
 )
 from app.services import audit_log_service
 from app.services import controls_testing_service as controls_svc
+from app.services import fraud_risk_service
 from app.services.evidence_extraction_service import extract_evidence, extract_evidence_from_image
 from app.services.llm_client import LLMUnavailableError
 from app.services.pdf_text_service import extract_text, has_extractable_text, render_pdf_page_to_image
@@ -215,6 +216,52 @@ def run_reconciliation_agent(db: Session, engagement: Engagement) -> AgentStepOu
     return AgentStepOutcome(OrchestrationStepStatus.SUCCESS, detail)
 
 
+def run_fraud_risk_agent(db: Session, engagement: Engagement) -> AgentStepOutcome:
+    """Deterministic pattern-matching only - see fraud_risk_service.py's
+    own module docstring for why this deliberately never calls an LLM.
+    Same re-run-everything-every-time + dedup-by-key approach as
+    reconciliation and controls testing: a flag is only ever written
+    OPEN the first time a given (flag_type, evidence records) pair
+    appears, so re-running never duplicates or reopens something a
+    human already resolved or dismissed."""
+    records = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement.id).all()
+    if not records:
+        return AgentStepOutcome(OrchestrationStepStatus.SKIPPED, "No evidence records to assess yet.")
+
+    evidence_like = [
+        fraud_risk_service.EvidenceLike(
+            id=r.id, doc_type=r.doc_type, vendor_name=r.vendor_name,
+            reference_number=r.reference_number, amount=r.amount, record_date=r.record_date,
+        )
+        for r in records
+    ]
+    results = fraud_risk_service.run_fraud_risk_detection(evidence_like)
+
+    existing = db.query(FraudRiskFlag).filter(FraudRiskFlag.engagement_id == engagement.id).all()
+    existing_keys = {(f.flag_type.value, f.evidence_record_ids) for f in existing}
+
+    new_count = 0
+    for result in results:
+        ids_str = ",".join(str(i) for i in sorted(result.evidence_record_ids))
+        key = (result.flag_type, ids_str)
+        if key in existing_keys:
+            continue
+        db.add(FraudRiskFlag(
+            engagement_id=engagement.id, client_id=engagement.client_id,
+            flag_type=result.flag_type, description=result.description,
+            evidence_record_ids=ids_str, severity=result.severity,
+        ))
+        new_count += 1
+    db.commit()
+
+    detail = f"{len(results)} risk signals found, {new_count} new"
+    audit_log_service.log(
+        db, actor="fraud_risk_agent", action="fraud_risk_run", detail=detail,
+        engagement_id=engagement.id, client_id=engagement.client_id,
+    )
+    return AgentStepOutcome(OrchestrationStepStatus.SUCCESS, detail)
+
+
 def run_controls_testing_agent(db: Session, engagement: Engagement) -> AgentStepOutcome:
     active_controls = db.query(Control).filter(Control.engagement_id == engagement.id, Control.active == "active").all()
     if not active_controls:
@@ -292,10 +339,10 @@ def _skip_step(db: Session, run: OrchestrationRun, step_order: int, agent_name: 
 
 
 def run_document_pipeline(db: Session, document: Document, engagement: Engagement) -> OrchestrationRun:
-    """Triggered by an upload. Extraction always runs first; reconciliation
-    and controls testing only run if extraction actually produced
-    evidence - otherwise they're recorded as SKIPPED, not silently
-    absent from the run's history."""
+    """Triggered by an upload. Extraction always runs first; reconciliation,
+    fraud-risk detection, and controls testing only run if extraction
+    actually produced evidence - otherwise they're recorded as SKIPPED,
+    not silently absent from the run's history."""
     run = OrchestrationRun(
         engagement_id=engagement.id, client_id=engagement.client_id,
         trigger=OrchestrationTrigger.DOCUMENT_UPLOAD, triggered_by=document.filename,
@@ -308,11 +355,13 @@ def run_document_pipeline(db: Session, document: Document, engagement: Engagemen
 
     if extraction_outcome.status == OrchestrationStepStatus.SUCCESS:
         recon_outcome = _execute_step(db, run, 2, "reconciliation_agent", run_reconciliation_agent, db, engagement)
-        controls_outcome = _execute_step(db, run, 3, "controls_testing_agent", run_controls_testing_agent, db, engagement)
-        failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, controls_outcome.status)
+        fraud_outcome = _execute_step(db, run, 3, "fraud_risk_agent", run_fraud_risk_agent, db, engagement)
+        controls_outcome = _execute_step(db, run, 4, "controls_testing_agent", run_controls_testing_agent, db, engagement)
+        failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, fraud_outcome.status, controls_outcome.status)
     else:
         _skip_step(db, run, 2, "reconciliation_agent", "Skipped - evidence extraction did not succeed.")
-        _skip_step(db, run, 3, "controls_testing_agent", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 3, "fraud_risk_agent", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 4, "controls_testing_agent", "Skipped - evidence extraction did not succeed.")
         failed = extraction_outcome.status == OrchestrationStepStatus.FAILED
 
     run.status = OrchestrationRunStatus.FAILED if failed else OrchestrationRunStatus.COMPLETED
@@ -328,9 +377,9 @@ def run_document_pipeline(db: Session, document: Document, engagement: Engagemen
 
 
 def run_full_engagement_check(db: Session, engagement: Engagement, triggered_by: str) -> OrchestrationRun:
-    """A human-triggered re-run of reconciliation + controls testing
-    across ALL existing evidence - useful after defining a new control
-    or changing one, without needing to re-upload anything."""
+    """A human-triggered re-run of reconciliation + fraud-risk detection +
+    controls testing across ALL existing evidence - useful after defining
+    a new control or changing one, without needing to re-upload anything."""
     run = OrchestrationRun(
         engagement_id=engagement.id, client_id=engagement.client_id,
         trigger=OrchestrationTrigger.MANUAL, triggered_by=triggered_by,
@@ -340,8 +389,9 @@ def run_full_engagement_check(db: Session, engagement: Engagement, triggered_by:
     db.commit()
 
     recon_outcome = _execute_step(db, run, 1, "reconciliation_agent", run_reconciliation_agent, db, engagement)
-    controls_outcome = _execute_step(db, run, 2, "controls_testing_agent", run_controls_testing_agent, db, engagement)
-    failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, controls_outcome.status)
+    fraud_outcome = _execute_step(db, run, 2, "fraud_risk_agent", run_fraud_risk_agent, db, engagement)
+    controls_outcome = _execute_step(db, run, 3, "controls_testing_agent", run_controls_testing_agent, db, engagement)
+    failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, fraud_outcome.status, controls_outcome.status)
 
     run.status = OrchestrationRunStatus.FAILED if failed else OrchestrationRunStatus.COMPLETED
     run.completed_at = _now()
