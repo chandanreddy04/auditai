@@ -33,8 +33,7 @@
     <h3>Finalize</h3>
     <p class="subtle small">Locks the draft above as-is. This cannot be undone in this version of the app.</p>
     <form method="post" action="/engagements/{{ engagement.id }}/workpaper/finalize" class="inline-form">
-        <input type="text" name="finalized_by" placeholder="Your name" required>
-        <button type="submit" {{ "disabled" if not wp.content else "" }}>Finalize workpaper</button>
+        <button type="submit" {{ "disabled" if not wp.content else "" }}>Finalize workpaper (as {{ current_user.name }})</button>
     </form>
 {% endif %}
 {% endblock %}

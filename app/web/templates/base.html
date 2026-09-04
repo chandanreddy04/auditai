@@ -8,6 +8,14 @@
 <body>
     <header class="topbar">
         <a href="/" class="brand">AuditAI <span class="phase-tag">Phase 1-5</span></a>
+        {% if current_user %}
+        <span class="topbar-user">
+            {{ current_user.name }}
+            <form method="post" action="/logout" style="display:inline;">
+                <button type="submit" class="link-button">Log out</button>
+            </form>
+        </span>
+        {% endif %}
     </header>
     <main class="container">
         {% block content %}{% endblock %}

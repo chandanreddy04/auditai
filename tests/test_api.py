@@ -6,6 +6,12 @@ from app.main import app
 init_db()
 client = TestClient(app)
 
+# Every route except /health, /login, /signup now requires a logged-in
+# user (see app/web/auth_routes.py). TestClient's cookie jar persists
+# across requests made on this same client instance, so signing up
+# once here authenticates every request the rest of this file makes.
+client.post("/signup", data={"name": "Test Auditor", "email": "test-auditor@example.com", "password": "testpassword123"})
+
 
 def test_health():
     resp = client.get("/health")
@@ -127,7 +133,7 @@ def test_controls_testing_flow():
 
     resp = client.post(
         f"/control-results/{open_result.id}/resolve",
-        data={"resolved_by": "Test Auditor", "resolution_note": "Investigated - compensating control found.", "action": "resolved"},
+        data={"resolution_note": "Investigated - compensating control found.", "action": "resolved"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -171,7 +177,7 @@ def test_workpaper_flow(monkeypatch):
     assert "draft" in resp.text.lower()
 
     # Cannot finalize an empty draft.
-    resp = client.post(f"/engagements/{engagement.id}/workpaper/finalize", data={"finalized_by": "Test Auditor"})
+    resp = client.post(f"/engagements/{engagement.id}/workpaper/finalize")
     assert resp.status_code == 400
 
     # Generate (LLM call mocked above) -> draft content appears.
@@ -194,7 +200,6 @@ def test_workpaper_flow(monkeypatch):
     # Finalize locks it.
     resp = client.post(
         f"/engagements/{engagement.id}/workpaper/finalize",
-        data={"finalized_by": "Test Auditor"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -272,7 +277,7 @@ def test_pbc_flow(monkeypatch):
     # Mark the overdue one received.
     resp = client.post(
         f"/pbc/{bank_item.id}/receive",
-        data={"resolved_by": "Test Auditor", "resolution_note": "Received via email", "linked_document_id": ""},
+        data={"resolution_note": "Received via email", "linked_document_id": ""},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -280,7 +285,7 @@ def test_pbc_flow(monkeypatch):
     # Waive the other one.
     resp = client.post(
         f"/pbc/{lease_item.id}/waive",
-        data={"resolved_by": "Test Auditor", "resolution_note": "Not needed for this scope"},
+        data={"resolution_note": "Not needed for this scope"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -359,11 +364,7 @@ def test_orchestration_flow(monkeypatch):
     db.close()
 
     # Manual full-check trigger.
-    resp = client.post(
-        f"/engagements/{engagement.id}/run-full-check",
-        data={"triggered_by": "Test Auditor"},
-        follow_redirects=False,
-    )
+    resp = client.post(f"/engagements/{engagement.id}/run-full-check", follow_redirects=False)
     assert resp.status_code == 303
 
     resp = client.get(f"/engagements/{engagement.id}/orchestration")

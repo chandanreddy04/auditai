@@ -10,9 +10,11 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: var(--ink); background: var(--bg); }
-.topbar { background: var(--ink); padding: 14px 24px; }
+.topbar { background: var(--ink); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
 .brand { color: #fff; text-decoration: none; font-weight: 600; font-size: 18px; }
 .phase-tag { background: var(--accent); color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-left: 8px; font-weight: 500; }
+.topbar-user { color: #cfd4dd; font-size: 13px; display: flex; align-items: center; gap: 10px; }
+.link-button { background: none; border: none; color: #cfd4dd; text-decoration: underline; cursor: pointer; padding: 0; font-size: 13px; }
 .container { max-width: 900px; margin: 0 auto; padding: 28px 24px 60px; }
 h1 { margin-top: 4px; }
 .subtle { color: var(--subtle); }

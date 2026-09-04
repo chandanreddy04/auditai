@@ -13,7 +13,7 @@ import enum
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text,
+    Boolean, Column, Date, DateTime, Enum, Float, ForeignKey, Integer, String, Text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -22,6 +22,27 @@ Base = declarative_base()
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class User(Base):
+    """A real auditor account - new scope beyond the original 5-phase
+    roadmap, added so every 'resolved by' / 'finalized by' / 'triggered
+    by' field in this app is a real, authenticated person instead of a
+    typed name anyone could type incorrectly (or as someone else).
+    Deactivated (is_active=False), never deleted - every table above
+    that stores a person's name as plain text (resolved_by, etc.) does
+    so by name, not by a foreign key, specifically so those historical
+    records stay readable even if the account behind them is later
+    deactivated."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(200), nullable=False)
+    email = Column(String(300), nullable=False, unique=True, index=True)
+    password_hash = Column(String(200), nullable=False)
+    password_salt = Column(String(64), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=_now)
 
 
 class Client(Base):

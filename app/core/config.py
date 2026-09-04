@@ -35,3 +35,8 @@ RECONCILIATION_AMOUNT_TOLERANCE = float(os.getenv("RECONCILIATION_AMOUNT_TOLERAN
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# Signs the session cookie (see app/web/auth_routes.py). The fallback is
+# fine for local dev only - anyone who reads it could forge a session
+# cookie, so a real deployment MUST set SECRET_KEY in the environment.
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-only-insecure-secret-key-change-me")

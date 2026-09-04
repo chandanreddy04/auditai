@@ -10,6 +10,11 @@ a document just hands off to orchestration_service.run_document_pipeline()
 and gets back a fully-recorded OrchestrationRun. Routes create things,
 render pages, and let a human resolve/dismiss/finalize/receive/waive -
 coordinating agents is orchestration_service.py's job now.
+
+Every route below requires a logged-in user (get_current_user - see
+auth_routes.py). "Who did this" is no longer a typed name a form
+accepts on trust; it's current_user.name, only ever set by whoever is
+actually signed in.
 """
 
 import logging
@@ -26,13 +31,14 @@ from app.database.session import get_db
 from app.models.models import (
     Client, Control, ControlRuleType, ControlTestResult, Document,
     Engagement, EvidenceRecord, ExceptionStatus, PBCRequest, PBCStatus,
-    ReconciliationException, Workpaper, WorkpaperStatus,
+    ReconciliationException, User, Workpaper, WorkpaperStatus,
 )
 from app.services import audit_log_service
 from app.services import orchestration_service
 from app.services import pbc_service
 from app.services import workpaper_service
 from app.services.llm_client import LLMUnavailableError
+from app.web.auth_routes import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,29 +48,29 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # ---------------------------------------------------------------- clients
 
 @router.get("/")
-def home(request: Request, db: Session = Depends(get_db)):
+def home(request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     clients = db.query(Client).order_by(Client.name).all()
-    return templates.TemplateResponse("clients.html", {"request": request, "clients": clients})
+    return templates.TemplateResponse("clients.html", {"request": request, "clients": clients, "current_user": current_user})
 
 
 @router.post("/clients")
-def create_client(name: str = Form(...), db: Session = Depends(get_db)):
+def create_client(name: str = Form(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     client = Client(name=name.strip())
     db.add(client)
     db.commit()
-    audit_log_service.log(db, actor="human", action="client_created", detail=client.name, client_id=client.id)
+    audit_log_service.log(db, actor=current_user.name, action="client_created", detail=client.name, client_id=client.id)
     return RedirectResponse(url="/", status_code=303)
 
 
 @router.get("/clients/{client_id}")
-def client_detail(request: Request, client_id: int, db: Session = Depends(get_db)):
+def client_detail(request: Request, client_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     client = db.get(Client, client_id)
     if client is None:
         raise HTTPException(404, "Client not found")
     engagements = db.query(Engagement).filter(Engagement.client_id == client_id).order_by(Engagement.created_at.desc()).all()
     return templates.TemplateResponse(
         "client_detail.html",
-        {"request": request, "client": client, "engagements": engagements, "audit_types": AUDIT_TYPES},
+        {"request": request, "client": client, "engagements": engagements, "audit_types": AUDIT_TYPES, "current_user": current_user},
     )
 
 
@@ -72,7 +78,10 @@ AUDIT_TYPES = ["financial", "internal_controls", "compliance", "operational", "i
 
 
 @router.post("/clients/{client_id}/engagements")
-def create_engagement(client_id: int, name: str = Form(...), audit_type: str = Form("financial"), db: Session = Depends(get_db)):
+def create_engagement(
+    client_id: int, name: str = Form(...), audit_type: str = Form("financial"),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     client = db.get(Client, client_id)
     if client is None:
         raise HTTPException(404, "Client not found")
@@ -80,7 +89,7 @@ def create_engagement(client_id: int, name: str = Form(...), audit_type: str = F
     db.add(engagement)
     db.commit()
     audit_log_service.log(
-        db, actor="human", action="engagement_created", detail=engagement.name,
+        db, actor=current_user.name, action="engagement_created", detail=engagement.name,
         engagement_id=engagement.id, client_id=client_id,
     )
     return RedirectResponse(url=f"/clients/{client_id}", status_code=303)
@@ -96,7 +105,9 @@ def _get_engagement_or_404(db: Session, engagement_id: int) -> Engagement:
 
 
 @router.get("/engagements/{engagement_id}")
-def engagement_dashboard(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def engagement_dashboard(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     engagement = _get_engagement_or_404(db, engagement_id)
     documents = db.query(Document).filter(Document.engagement_id == engagement_id).order_by(Document.uploaded_at.desc()).all()
     open_exceptions = (
@@ -115,13 +126,15 @@ def engagement_dashboard(request: Request, engagement_id: int, db: Session = Dep
         {
             "request": request, "engagement": engagement, "documents": documents,
             "open_exceptions": open_exceptions, "open_control_failures": open_control_failures,
-            "evidence_count": evidence_count,
+            "evidence_count": evidence_count, "current_user": current_user,
         },
     )
 
 
 @router.post("/engagements/{engagement_id}/documents")
-async def upload_document(engagement_id: int, file: UploadFile, db: Session = Depends(get_db)):
+async def upload_document(
+    engagement_id: int, file: UploadFile, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     engagement = _get_engagement_or_404(db, engagement_id)
 
     dest_name = f"{uuid.uuid4().hex}_{file.filename}"
@@ -136,7 +149,7 @@ async def upload_document(engagement_id: int, file: UploadFile, db: Session = De
     db.add(document)
     db.commit()
     audit_log_service.log(
-        db, actor="human", action="document_uploaded", detail=file.filename,
+        db, actor=current_user.name, action="document_uploaded", detail=file.filename,
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
 
@@ -148,7 +161,9 @@ async def upload_document(engagement_id: int, file: UploadFile, db: Session = De
 # -------------------------------------------------------- exception queue
 
 @router.get("/engagements/{engagement_id}/exceptions")
-def exceptions_queue(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def exceptions_queue(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     engagement = _get_engagement_or_404(db, engagement_id)
     open_exceptions = (
         db.query(ReconciliationException)
@@ -165,14 +180,17 @@ def exceptions_queue(request: Request, engagement_id: int, db: Session = Depends
     )
     return templates.TemplateResponse(
         "exceptions_queue.html",
-        {"request": request, "engagement": engagement, "open_exceptions": open_exceptions, "resolved_exceptions": resolved_exceptions},
+        {
+            "request": request, "engagement": engagement, "open_exceptions": open_exceptions,
+            "resolved_exceptions": resolved_exceptions, "current_user": current_user,
+        },
     )
 
 
 @router.post("/exceptions/{exception_id}/resolve")
 def resolve_exception(
-    exception_id: int, resolved_by: str = Form(...), resolution_note: str = Form(""),
-    action: str = Form("resolved"), db: Session = Depends(get_db),
+    exception_id: int, resolution_note: str = Form(""), action: str = Form("resolved"),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     exc = db.get(ReconciliationException, exception_id)
     if exc is None:
@@ -180,13 +198,13 @@ def resolve_exception(
 
     from datetime import datetime, timezone
     exc.status = ExceptionStatus.RESOLVED if action == "resolved" else ExceptionStatus.DISMISSED
-    exc.resolved_by = resolved_by.strip()
+    exc.resolved_by = current_user.name
     exc.resolution_note = resolution_note.strip()
     exc.resolved_at = datetime.now(timezone.utc)
     db.commit()
 
     audit_log_service.log(
-        db, actor=resolved_by.strip(), action=f"exception_{exc.status.value}",
+        db, actor=current_user.name, action=f"exception_{exc.status.value}",
         detail=f"#{exc.id}: {resolution_note.strip()}",
         engagement_id=exc.engagement_id, client_id=exc.client_id,
     )
@@ -196,7 +214,9 @@ def resolve_exception(
 # ----------------------------------------------------------------- controls
 
 @router.get("/engagements/{engagement_id}/controls")
-def controls_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def controls_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     engagement = _get_engagement_or_404(db, engagement_id)
     controls = db.query(Control).filter(Control.engagement_id == engagement_id).order_by(Control.created_at).all()
 
@@ -218,7 +238,7 @@ def controls_page(request: Request, engagement_id: int, db: Session = Depends(ge
         {
             "request": request, "engagement": engagement, "controls": controls,
             "open_results": open_results, "closed_results": closed_results,
-            "rule_types": [t.value for t in ControlRuleType],
+            "rule_types": [t.value for t in ControlRuleType], "current_user": current_user,
         },
     )
 
@@ -226,7 +246,7 @@ def controls_page(request: Request, engagement_id: int, db: Session = Depends(ge
 @router.post("/engagements/{engagement_id}/controls")
 def create_control(
     engagement_id: int, name: str = Form(...), rule_type: str = Form(...),
-    threshold_amount: float = Form(0.0), db: Session = Depends(get_db),
+    threshold_amount: float = Form(0.0), db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     engagement = _get_engagement_or_404(db, engagement_id)
     control = Control(
@@ -236,7 +256,7 @@ def create_control(
     db.add(control)
     db.commit()
     audit_log_service.log(
-        db, actor="human", action="control_defined",
+        db, actor=current_user.name, action="control_defined",
         detail=f"{control.name} ({control.rule_type.value}, threshold={control.threshold_amount:,.2f})",
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
@@ -246,8 +266,8 @@ def create_control(
 
 @router.post("/control-results/{result_id}/resolve")
 def resolve_control_result(
-    result_id: int, resolved_by: str = Form(...), resolution_note: str = Form(""),
-    action: str = Form("resolved"), db: Session = Depends(get_db),
+    result_id: int, resolution_note: str = Form(""), action: str = Form("resolved"),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     result = db.get(ControlTestResult, result_id)
     if result is None:
@@ -255,13 +275,13 @@ def resolve_control_result(
 
     from datetime import datetime, timezone
     result.status = ExceptionStatus.RESOLVED if action == "resolved" else ExceptionStatus.DISMISSED
-    result.resolved_by = resolved_by.strip()
+    result.resolved_by = current_user.name
     result.resolution_note = resolution_note.strip()
     result.resolved_at = datetime.now(timezone.utc)
     db.commit()
 
     audit_log_service.log(
-        db, actor=resolved_by.strip(), action=f"control_result_{result.status.value}",
+        db, actor=current_user.name, action=f"control_result_{result.status.value}",
         detail=f"#{result.id}: {resolution_note.strip()}",
         engagement_id=result.engagement_id, client_id=result.client_id,
     )
@@ -280,14 +300,16 @@ def _get_or_create_workpaper(db: Session, engagement: Engagement) -> Workpaper:
 
 
 @router.get("/engagements/{engagement_id}/workpaper")
-def workpaper_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def workpaper_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     engagement = _get_engagement_or_404(db, engagement_id)
     wp = _get_or_create_workpaper(db, engagement)
-    return templates.TemplateResponse("workpaper.html", {"request": request, "engagement": engagement, "wp": wp})
+    return templates.TemplateResponse("workpaper.html", {"request": request, "engagement": engagement, "wp": wp, "current_user": current_user})
 
 
 @router.post("/engagements/{engagement_id}/workpaper/generate")
-def generate_workpaper(engagement_id: int, db: Session = Depends(get_db)):
+def generate_workpaper(engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """The one LLM call in this phase: build the deterministic summary
     of everything decided so far, then ask the model to write it up.
     Refuses to overwrite a finalized workpaper - regenerating means
@@ -325,7 +347,9 @@ def generate_workpaper(engagement_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/engagements/{engagement_id}/workpaper/save")
-def save_workpaper(engagement_id: int, content: str = Form(...), db: Session = Depends(get_db)):
+def save_workpaper(
+    engagement_id: int, content: str = Form(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     from datetime import datetime, timezone
 
     engagement = _get_engagement_or_404(db, engagement_id)
@@ -338,14 +362,14 @@ def save_workpaper(engagement_id: int, content: str = Form(...), db: Session = D
     db.commit()
 
     audit_log_service.log(
-        db, actor="human", action="workpaper_edited", detail=f"{len(content)} characters",
+        db, actor=current_user.name, action="workpaper_edited", detail=f"{len(content)} characters",
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
     return RedirectResponse(url=f"/engagements/{engagement_id}/workpaper", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/workpaper/finalize")
-def finalize_workpaper(engagement_id: int, finalized_by: str = Form(...), db: Session = Depends(get_db)):
+def finalize_workpaper(engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from datetime import datetime, timezone
 
     engagement = _get_engagement_or_404(db, engagement_id)
@@ -354,12 +378,12 @@ def finalize_workpaper(engagement_id: int, finalized_by: str = Form(...), db: Se
         raise HTTPException(400, "Cannot finalize an empty workpaper - generate or write a draft first.")
 
     wp.status = WorkpaperStatus.FINALIZED
-    wp.finalized_by = finalized_by.strip()
+    wp.finalized_by = current_user.name
     wp.finalized_at = datetime.now(timezone.utc)
     db.commit()
 
     audit_log_service.log(
-        db, actor=finalized_by.strip(), action="workpaper_finalized", detail="",
+        db, actor=current_user.name, action="workpaper_finalized", detail="",
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
     return RedirectResponse(url=f"/engagements/{engagement_id}/workpaper", status_code=303)
@@ -368,7 +392,9 @@ def finalize_workpaper(engagement_id: int, finalized_by: str = Form(...), db: Se
 # ------------------------------------------------------------------- pbc
 
 @router.get("/engagements/{engagement_id}/pbc")
-def pbc_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def pbc_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     from datetime import date
 
     engagement = _get_engagement_or_404(db, engagement_id)
@@ -387,7 +413,7 @@ def pbc_page(request: Request, engagement_id: int, db: Session = Depends(get_db)
         {
             "request": request, "engagement": engagement, "open_requests": open_requests,
             "closed_requests": closed_requests, "overdue_ids": overdue_ids, "documents": documents,
-            "has_overdue": bool(overdue_ids), "reminder_draft": None,
+            "has_overdue": bool(overdue_ids), "reminder_draft": None, "current_user": current_user,
         },
     )
 
@@ -395,7 +421,7 @@ def pbc_page(request: Request, engagement_id: int, db: Session = Depends(get_db)
 @router.post("/engagements/{engagement_id}/pbc")
 def create_pbc_request(
     engagement_id: int, item_name: str = Form(...), description: str = Form(""),
-    due_date: str = Form(""), db: Session = Depends(get_db),
+    due_date: str = Form(""), db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     from datetime import date as date_cls
 
@@ -408,7 +434,7 @@ def create_pbc_request(
     db.add(req)
     db.commit()
     audit_log_service.log(
-        db, actor="human", action="pbc_requested", detail=f"{req.item_name} (due {due_date or 'no date set'})",
+        db, actor=current_user.name, action="pbc_requested", detail=f"{req.item_name} (due {due_date or 'no date set'})",
         engagement_id=engagement_id, client_id=engagement.client_id,
     )
     return RedirectResponse(url=f"/engagements/{engagement_id}/pbc", status_code=303)
@@ -416,8 +442,8 @@ def create_pbc_request(
 
 @router.post("/pbc/{request_id}/receive")
 def receive_pbc_request(
-    request_id: int, resolved_by: str = Form(...), resolution_note: str = Form(""),
-    linked_document_id: str = Form(""), db: Session = Depends(get_db),
+    request_id: int, resolution_note: str = Form(""), linked_document_id: str = Form(""),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     from datetime import datetime, timezone
 
@@ -426,7 +452,7 @@ def receive_pbc_request(
         raise HTTPException(404, "PBC request not found")
 
     req.status = PBCStatus.RECEIVED
-    req.resolved_by = resolved_by.strip()
+    req.resolved_by = current_user.name
     req.resolution_note = resolution_note.strip() or None
     req.resolved_at = datetime.now(timezone.utc)
     if linked_document_id.strip():
@@ -434,14 +460,16 @@ def receive_pbc_request(
     db.commit()
 
     audit_log_service.log(
-        db, actor=resolved_by.strip(), action="pbc_received", detail=f"{req.item_name}: {req.resolution_note or ''}",
+        db, actor=current_user.name, action="pbc_received", detail=f"{req.item_name}: {req.resolution_note or ''}",
         engagement_id=req.engagement_id, client_id=req.client_id,
     )
     return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
 
 
 @router.post("/pbc/{request_id}/waive")
-def waive_pbc_request(request_id: int, resolved_by: str = Form(...), resolution_note: str = Form(...), db: Session = Depends(get_db)):
+def waive_pbc_request(
+    request_id: int, resolution_note: str = Form(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     from datetime import datetime, timezone
 
     req = db.get(PBCRequest, request_id)
@@ -449,20 +477,22 @@ def waive_pbc_request(request_id: int, resolved_by: str = Form(...), resolution_
         raise HTTPException(404, "PBC request not found")
 
     req.status = PBCStatus.WAIVED
-    req.resolved_by = resolved_by.strip()
+    req.resolved_by = current_user.name
     req.resolution_note = resolution_note.strip()
     req.resolved_at = datetime.now(timezone.utc)
     db.commit()
 
     audit_log_service.log(
-        db, actor=resolved_by.strip(), action="pbc_waived", detail=f"{req.item_name}: {req.resolution_note}",
+        db, actor=current_user.name, action="pbc_waived", detail=f"{req.item_name}: {req.resolution_note}",
         engagement_id=req.engagement_id, client_id=req.client_id,
     )
     return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/pbc/draft-reminder")
-def draft_pbc_reminder(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def draft_pbc_reminder(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     """Renders the page directly with a drafted reminder rather than
     redirecting - the draft is deliberately not persisted anywhere
     (it's a one-off convenience, not a fact worth storing), so a
@@ -500,7 +530,7 @@ def draft_pbc_reminder(request: Request, engagement_id: int, db: Session = Depen
         {
             "request": request, "engagement": engagement, "open_requests": open_requests,
             "closed_requests": closed_requests, "overdue_ids": overdue_ids, "documents": documents,
-            "has_overdue": bool(overdue_ids), "reminder_draft": reminder_draft,
+            "has_overdue": bool(overdue_ids), "reminder_draft": reminder_draft, "current_user": current_user,
         },
     )
 
@@ -508,7 +538,9 @@ def draft_pbc_reminder(request: Request, engagement_id: int, db: Session = Depen
 # ---------------------------------------------------------- orchestration
 
 @router.get("/engagements/{engagement_id}/orchestration")
-def orchestration_page(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def orchestration_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     from app.models.models import OrchestrationRun
 
     engagement = _get_engagement_or_404(db, engagement_id)
@@ -519,24 +551,26 @@ def orchestration_page(request: Request, engagement_id: int, db: Session = Depen
         .limit(30)
         .all()
     )
-    return templates.TemplateResponse("orchestration.html", {"request": request, "engagement": engagement, "runs": runs})
+    return templates.TemplateResponse("orchestration.html", {"request": request, "engagement": engagement, "runs": runs, "current_user": current_user})
 
 
 @router.post("/engagements/{engagement_id}/run-full-check")
-def run_full_check(engagement_id: int, triggered_by: str = Form(...), db: Session = Depends(get_db)):
+def run_full_check(engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """The one manually-triggered orchestration entry point: re-runs
     reconciliation + controls testing across ALL of an engagement's
     evidence without needing a new document upload - e.g. right after
     defining or changing a control."""
     engagement = _get_engagement_or_404(db, engagement_id)
-    orchestration_service.run_full_engagement_check(db, engagement, triggered_by=triggered_by.strip())
+    orchestration_service.run_full_engagement_check(db, engagement, triggered_by=current_user.name)
     return RedirectResponse(url=f"/engagements/{engagement_id}/orchestration", status_code=303)
 
 
 # -------------------------------------------------------------- audit log
 
 @router.get("/engagements/{engagement_id}/audit-log")
-def audit_log(request: Request, engagement_id: int, db: Session = Depends(get_db)):
+def audit_log(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
     from app.models.models import AuditLogEntry
     engagement = _get_engagement_or_404(db, engagement_id)
     entries = (
@@ -545,4 +579,4 @@ def audit_log(request: Request, engagement_id: int, db: Session = Depends(get_db
         .order_by(AuditLogEntry.created_at.desc())
         .all()
     )
-    return templates.TemplateResponse("audit_log.html", {"request": request, "engagement": engagement, "entries": entries})
+    return templates.TemplateResponse("audit_log.html", {"request": request, "engagement": engagement, "entries": entries, "current_user": current_user})

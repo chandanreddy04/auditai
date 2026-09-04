@@ -21,6 +21,10 @@ Phase 4: PBC / request tracking                                                 
 Phase 5: multi-agent orchestration across all of the above                                                [done]
 ```
 
+Beyond that original roadmap, one more piece has since been added:
+**real user accounts** (signup/login/logout) replacing the typed-name
+fields the five phases originally used for "who did this."
+
 ## Why it's built this way
 
 Four rules, non-negotiable from the first commit:
@@ -128,6 +132,20 @@ All five phases share: an append-only audit log of every agent action
 and every human decision, and a human review queue where nothing
 auto-closes on its own.
 
+**Real authentication (new scope beyond the 5-phase roadmap).** Every
+route in the app now requires a logged-in user
+([`auth_routes.py`](app/web/auth_routes.py)) - session-based, via a
+signed cookie (Starlette's `SessionMiddleware`), not JWTs or OAuth this
+single-server app doesn't need. Passwords are hashed with PBKDF2-HMAC-
+SHA256 from the standard library, not bcrypt/argon2 - see
+[`auth_service.py`](app/services/auth_service.py) for why that
+trade-off makes sense here. Every "your name" text field that used to
+appear on a Resolve/Finalize/Waive/Run-full-check form is gone -
+`current_user.name` fills it in automatically, so a resolution can no
+longer be attributed to a name someone else typed. Historical records
+created before this feature still show generic actors like `"human"`
+- an honest gap, not rewritten after the fact.
+
 ## Known limitations (found via live testing, not yet fixed)
 
 - **Reconciliation compares invoice-to-PO amounts 1:1.** A single
@@ -143,9 +161,14 @@ auto-closes on its own.
   layer. Vision-based extraction for scans is a known, straightforward
   fast-follow (the technique is already proven elsewhere in this
   stack) — left out here to keep each phase narrow.
-- **No real authentication.** "Resolved by" is a typed name, not a
-  login. Fine for proving the workflow; not fine for anything handling
-  real client data.
+- **Authentication has no email verification, password reset, or
+  login-attempt rate limiting.** Any email/password gets an account
+  immediately; nothing stops repeated login guesses. Fine for a small
+  internal tool proving the workflow; a real deployment handling real
+  client data needs all three before going further.
+- **No roles or permissions.** Every logged-in user can do everything -
+  there's no "partner vs. staff" distinction yet, even though the
+  blueprint's own permission matrix calls for one.
 - **The orchestrator only coordinates the automatic per-upload pipeline
   and the manual full-check re-run.** Workpaper drafting and PBC
   reminders are deliberately NOT part of any orchestrated pipeline -
@@ -184,13 +207,19 @@ ollama pull phi3.5            # one-time, for the local LLM backend
 uvicorn app.main:app --reload
 ```
 
-Open `http://localhost:8000`. No `GROQ_API_KEY` needed locally — it
+Open `http://localhost:8000` - it redirects to `/login`; sign up for
+an account on first visit. No `GROQ_API_KEY` needed locally — it
 talks to Ollama on localhost automatically. Setting `GROQ_API_KEY`
 switches every LLM call to Groq's hosted free tier instead (see
 [`app/services/llm_client.py`](app/services/llm_client.py)), for a
 deployment target with no local GPU/CPU budget to run even a small
 model — same dual-backend pattern already load-tested elsewhere in
 this stack.
+
+Set `SECRET_KEY` in the environment for anything beyond local dev - it
+signs the session cookie, and the fallback value in `config.py` is
+intentionally insecure (anyone who reads the source could forge a
+session with it).
 
 ## Tests
 
@@ -212,6 +241,11 @@ SQLite database. `test_evidence_extraction_service.py` and the drafting
 halves of `test_workpaper_service.py`/`test_pbc_service.py` cover
 LLM-touching code with the model call mocked.
 
+`test_auth_service.py` covers password hashing (zero LLM, zero HTTP).
+`test_auth_routes.py` covers signup/login/logout and the
+redirect-when-logged-out behavior with its own `TestClient`, since
+`test_api.py` shares one already-logged-in client across its whole file.
+
 Every feature here has also been verified **live**, not just against
 mocks: a real local model (phi3.5 via Ollama), a real running server,
 real generated PDFs uploaded through the actual routes and browser UI.
@@ -224,13 +258,14 @@ tests alone would not have caught any of them.
 ```
 app/
   core/config.py                     settings, one seam for the environment
-  models/models.py                   Client, Engagement, Document, EvidenceRecord,
+  models/models.py                   User, Client, Engagement, Document, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
                                       Workpaper, PBCRequest, OrchestrationRun,
                                       OrchestrationStep, AuditLogEntry
   database/session.py                engine, session factory, get_db()
   schemas/extraction.py              the schema the LLM's output is constrained to
   services/
+    auth_service.py                  password hashing (PBKDF2-HMAC-SHA256)
     llm_client.py                    Ollama/Groq switch, the only LLM seam
     pdf_text_service.py              deterministic PDF text-layer extraction
     evidence_extraction_service.py   LLM: document text -> structured evidence
@@ -240,7 +275,9 @@ app/
     pbc_service.py                   deterministic overdue calc + Phase 4's one LLM call
     orchestration_service.py         Phase 5: coordinates the agents above, logs every step
     audit_log_service.py             one function, called after every action
-  web/routes.py                      the whole app, wired together
+  web/
+    auth_routes.py                   signup/login/logout + get_current_user dependency
+    routes.py                        the whole app, wired together
 tests/
 ```
 
@@ -254,5 +291,6 @@ own recommendation was followed literally: *"do not begin by building
 ten autonomous agents — start with one narrow, measurable workflow and
 make it reliable, secure, and explainable, then add capabilities in
 phases."* This repo is that recommendation, built one phase at a time -
-all five planned phases now complete, 72 tests passing, every feature
-verified live against a real local model, not just against mocks.
+all five planned phases now complete, plus real authentication added
+as a follow-up, 85 tests passing, every feature verified live against
+a real local model, not just against mocks.

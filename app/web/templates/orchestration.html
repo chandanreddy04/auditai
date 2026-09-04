@@ -11,8 +11,7 @@
 </p>
 
 <form method="post" action="/engagements/{{ engagement.id }}/run-full-check" class="inline-form">
-    <input type="text" name="triggered_by" placeholder="Your name" required>
-    <button type="submit">Run full check now</button>
+    <button type="submit">Run full check now (as {{ current_user.name }})</button>
 </form>
 
 {% for run in runs %}

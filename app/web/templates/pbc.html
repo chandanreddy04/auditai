@@ -24,7 +24,6 @@
             <td>{% if r.id in overdue_ids %}<span class="badge badge-failed">overdue</span>{% else %}<span class="badge">requested</span>{% endif %}</td>
             <td>
                 <form method="post" action="/pbc/{{ r.id }}/receive" class="inline-form">
-                    <input type="text" name="resolved_by" placeholder="Your name" required style="width:100px">
                     <select name="linked_document_id">
                         <option value="">no linked document</option>
                         {% for d in documents %}<option value="{{ d.id }}">{{ d.filename }}</option>{% endfor %}
@@ -33,7 +32,6 @@
                     <button type="submit">Mark received</button>
                 </form>
                 <form method="post" action="/pbc/{{ r.id }}/waive" class="inline-form">
-                    <input type="text" name="resolved_by" placeholder="Your name" required style="width:100px">
                     <input type="text" name="resolution_note" placeholder="Why waived?" required>
                     <button type="submit" class="secondary">Waive</button>
                 </form>

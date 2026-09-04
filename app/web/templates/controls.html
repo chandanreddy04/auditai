@@ -40,7 +40,6 @@
     </div>
     <p>{{ r.detail }}</p>
     <form method="post" action="/control-results/{{ r.id }}/resolve" class="inline-form">
-        <input type="text" name="resolved_by" placeholder="Your name" required>
         <input type="text" name="resolution_note" placeholder="Resolution note (what did you find?)">
         <button type="submit" name="action" value="resolved">Resolve</button>
         <button type="submit" name="action" value="dismissed" class="secondary">Dismiss (false positive)</button>
