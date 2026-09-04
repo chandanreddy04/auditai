@@ -35,6 +35,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip() or None
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3.5")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
+# Vision-capable models - only used for scanned PDFs (no text layer) and
+# directly-uploaded photos/screenshots (JPG/PNG). Same models already
+# proven out in InvoiceIQ's own vision extraction.
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-phi3")
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
+
 # Reconciliation tolerance: two amounts that should match (e.g. an
 # invoice total against its purchase order) are still considered a
 # match if they differ by less than this - real documents round tax

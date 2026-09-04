@@ -14,7 +14,7 @@ import logging
 import re
 
 from app.schemas.extraction import LLMExtractedEvidence
-from app.services.llm_client import LLMUnavailableError, chat
+from app.services.llm_client import LLMUnavailableError, chat, chat_with_image
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,19 @@ def _normalize_currency(raw: str) -> str:
     return "USD"
 
 
+def _parse_and_normalize(content: str) -> LLMExtractedEvidence:
+    try:
+        data = json.loads(content)
+        result = LLMExtractedEvidence.model_validate(data)
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning("LLM returned invalid structured output: %s", e)
+        raise LLMUnavailableError(f"Model output did not match schema: {e}") from e
+
+    result.doc_type = _normalize_doc_type(result.doc_type)
+    result.currency = _normalize_currency(result.currency)
+    return result
+
+
 def extract_evidence(raw_text: str) -> LLMExtractedEvidence:
     try:
         content = chat(
@@ -98,14 +111,46 @@ def extract_evidence(raw_text: str) -> LLMExtractedEvidence:
     except LLMUnavailableError as e:
         logger.warning("Evidence extraction failed: %s", e)
         raise
+    return _parse_and_normalize(content)
 
+
+VISION_PROMPT = (
+    "You are looking at a photo or scan of one piece of audit evidence - "
+    "a purchase order, invoice, payment record, or bank statement. "
+    "Extract structured data from it, the same way you would from "
+    "document text. Fill in the fields as accurately as possible; if a "
+    "field isn't visible in the image, leave it null/default. Dates "
+    "must be in YYYY-MM-DD format. Only report a reference number, "
+    "amount, or vendor name you can actually read - never invent one "
+    "you can't make out.\n\n"
+    "doc_type MUST be exactly one of: purchase_order, invoice, payment, "
+    "bank_statement, unknown - never a human-readable label.\n\n"
+    "vendor_name is the company the document is FROM or addressed TO as "
+    "the supplier/payee. reference_number is THIS document's own "
+    "number; related_reference_number is a DIFFERENT document's number "
+    "this one points back to (e.g. an invoice showing 'PO #4521'). "
+    "currency is a 3-letter ISO code - if none is shown but a $ amount "
+    "is visible, use 'USD'. approver_name is whoever signed or approved "
+    "the document, if visible - null if there's no signature or approval "
+    "line at all."
+)
+
+
+def extract_evidence_from_image(image_bytes: bytes) -> LLMExtractedEvidence:
+    """Vision counterpart to extract_evidence() above - same job, same
+    output schema, same normalization, just reading pixels instead of a
+    text layer. Only ever called when pdf_text_service.has_extractable_text()
+    has already said there's no text to read (a scanned PDF page), or
+    when the uploaded file was a photo/screenshot to begin with (JPG/PNG) -
+    never a second opinion on a document the text pipeline already
+    handled. Same technique already proven out in InvoiceIQ."""
     try:
-        data = json.loads(content)
-        result = LLMExtractedEvidence.model_validate(data)
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.warning("LLM returned invalid structured output: %s", e)
-        raise LLMUnavailableError(f"Model output did not match schema: {e}") from e
-
-    result.doc_type = _normalize_doc_type(result.doc_type)
-    result.currency = _normalize_currency(result.currency)
-    return result
+        content = chat_with_image(
+            text=VISION_PROMPT,
+            image_bytes=image_bytes,
+            schema=LLMExtractedEvidence.model_json_schema(),
+        )
+    except LLMUnavailableError as e:
+        logger.warning("Vision evidence extraction failed: %s", e)
+        raise
+    return _parse_and_normalize(content)

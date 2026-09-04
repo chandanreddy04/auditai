@@ -38,9 +38,9 @@ from app.models.models import (
 )
 from app.services import audit_log_service
 from app.services import controls_testing_service as controls_svc
-from app.services.evidence_extraction_service import extract_evidence
+from app.services.evidence_extraction_service import extract_evidence, extract_evidence_from_image
 from app.services.llm_client import LLMUnavailableError
-from app.services.pdf_text_service import extract_text, has_extractable_text
+from app.services.pdf_text_service import extract_text, has_extractable_text, render_pdf_page_to_image
 from app.services.reconciliation_service import EvidenceLike, run_reconciliation
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,33 @@ class AgentStepOutcome:
 # created after evidence already exists only needs the controls-testing
 # agent to re-run, not a whole document pipeline).
 
+_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
 def run_evidence_extraction_agent(db: Session, document: Document, engagement: Engagement) -> AgentStepOutcome:
+    """Three ways in, one way out. A directly-uploaded photo/screenshot
+    (JPG/PNG) always goes straight to the vision model. A PDF tries its
+    real text layer first (cheap, fast, no vision model needed); only
+    if that PDF has no usable text at all (a scanned page) does it fall
+    back to rendering the page as an image and using the vision model -
+    same two-step gate + fallback already proven out in InvoiceIQ. A
+    photo that's too blurry/unreadable for even the vision model to
+    make sense of still comes back as a FAILED step, same as any other
+    extraction failure - vision isn't magic, it's just another reader."""
+    filename = (document.filename or "").lower()
+
+    if filename.endswith(_IMAGE_EXTENSIONS):
+        try:
+            with open(document.file_path, "rb") as f:
+                image_bytes = f.read()
+        except Exception as e:
+            logger.warning("Could not read image file for document %s: %s", document.id, e)
+            document.status = DocumentStatus.FAILED
+            document.failure_reason = "Could not read this file as an image."
+            db.commit()
+            return AgentStepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
+        return _extract_from_image(db, document, engagement, image_bytes)
+
     try:
         text = extract_text(document.file_path)
     except Exception as e:
@@ -73,30 +99,52 @@ def run_evidence_extraction_agent(db: Session, document: Document, engagement: E
         db.commit()
         return AgentStepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
 
-    if not has_extractable_text(text):
-        document.status = DocumentStatus.FAILED
-        document.failure_reason = (
-            "No text layer found (likely a scanned image). Vision-based "
-            "extraction for scanned documents is a planned fast-follow, "
-            "not yet part of this build."
-        )
+    if has_extractable_text(text):
+        document.raw_text = text
         db.commit()
-        return AgentStepOutcome(OrchestrationStepStatus.SKIPPED, document.failure_reason)
+        return _extract_from_text(db, document, engagement, text)
 
-    document.raw_text = text
+    # No text layer - render the page as an image and hand it to the
+    # vision model instead of giving up, same fallback InvoiceIQ proved out.
+    try:
+        image_bytes = render_pdf_page_to_image(document.file_path)
+    except Exception as e:
+        logger.warning("Could not render PDF page to image for document %s: %s", document.id, e)
+        document.status = DocumentStatus.FAILED
+        document.failure_reason = "No text layer found, and could not render the page as an image either."
+        db.commit()
+        return AgentStepOutcome(OrchestrationStepStatus.FAILED, document.failure_reason)
+    return _extract_from_image(db, document, engagement, image_bytes)
 
+
+def _extract_from_text(db: Session, document: Document, engagement: Engagement, text: str) -> AgentStepOutcome:
     try:
         extracted = extract_evidence(text)
     except LLMUnavailableError as e:
-        document.status = DocumentStatus.FAILED
-        document.failure_reason = f"AI extraction unavailable: {e}"
-        db.commit()
-        audit_log_service.log(
-            db, actor="evidence_extraction_agent", action="extraction_failed", detail=str(e),
-            engagement_id=engagement.id, client_id=engagement.client_id,
-        )
-        return AgentStepOutcome(OrchestrationStepStatus.FAILED, str(e))
+        return _fail_extraction(db, document, engagement, f"AI extraction unavailable: {e}")
+    return _save_extracted_evidence(db, document, engagement, extracted)
 
+
+def _extract_from_image(db: Session, document: Document, engagement: Engagement, image_bytes: bytes) -> AgentStepOutcome:
+    try:
+        extracted = extract_evidence_from_image(image_bytes)
+    except LLMUnavailableError as e:
+        return _fail_extraction(db, document, engagement, f"AI vision extraction unavailable: {e}")
+    return _save_extracted_evidence(db, document, engagement, extracted)
+
+
+def _fail_extraction(db: Session, document: Document, engagement: Engagement, reason: str) -> AgentStepOutcome:
+    document.status = DocumentStatus.FAILED
+    document.failure_reason = reason
+    db.commit()
+    audit_log_service.log(
+        db, actor="evidence_extraction_agent", action="extraction_failed", detail=reason,
+        engagement_id=engagement.id, client_id=engagement.client_id,
+    )
+    return AgentStepOutcome(OrchestrationStepStatus.FAILED, reason)
+
+
+def _save_extracted_evidence(db: Session, document: Document, engagement: Engagement, extracted) -> AgentStepOutcome:
     try:
         doc_type = DocumentType(extracted.doc_type)
     except ValueError:

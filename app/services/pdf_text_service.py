@@ -1,13 +1,11 @@
 """
 Pulls the text layer out of an uploaded PDF, deterministically - no LLM
 involved. If a document has no usable text layer (a scanned page with
-no OCR text baked in), has_extractable_text() says so up front and the
-route marks the document as failed/unreadable rather than silently
-sending an empty string to the LLM and getting a hallucinated result
-back. Vision-based extraction for scanned documents is the known
-Phase 1 gap noted in the README - the same technique InvoiceIQ already
-proved out is a straightforward fast-follow, deliberately left out of
-this first slice to keep it narrow.
+no OCR text baked in), has_extractable_text() says so up front, and
+render_pdf_page_to_image() renders that page to a PNG instead so a
+vision-capable model can read it directly (see
+evidence_extraction_service.extract_evidence_from_image()) - the same
+two-step gate + fallback already proven out in InvoiceIQ.
 """
 
 import fitz  # PyMuPDF
@@ -25,3 +23,18 @@ def extract_text(file_path: str) -> str:
 
 def has_extractable_text(text: str) -> bool:
     return len(text.strip()) >= MIN_TEXT_LAYER_CHARS
+
+
+def render_pdf_page_to_image(file_path: str, page_number: int = 0) -> bytes:
+    """The fallback path when has_extractable_text() says no: render the
+    page as a PNG so a vision-capable model can read it directly instead
+    of the pipeline just giving up. 150 DPI is enough resolution for a
+    model to read normal printed document text without producing an
+    unnecessarily large image - same setting already proven out in
+    InvoiceIQ."""
+    doc = fitz.open(file_path)
+    try:
+        pixmap = doc[page_number].get_pixmap(dpi=150)
+        return pixmap.tobytes("png")
+    finally:
+        doc.close()

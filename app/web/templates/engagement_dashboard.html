@@ -25,9 +25,9 @@
 </p>
 
 <h2>Upload evidence</h2>
-<p class="subtle">Purchase orders, invoices, payment records - PDF with a real text layer (not a scanned image, for Phase 1).</p>
+<p class="subtle">Purchase orders, invoices, payment records - a PDF (text or scanned) or a photo/screenshot (JPG/PNG). Scanned pages and photos are read by a vision-capable AI model instead of a text layer.</p>
 <form method="post" action="/engagements/{{ engagement.id }}/documents" enctype="multipart/form-data" class="inline-form">
-    <input type="file" name="file" accept="application/pdf" required>
+    <input type="file" name="file" accept="application/pdf,image/jpeg,image/png" required>
     <button type="submit">Upload &amp; extract</button>
 </form>
 

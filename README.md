@@ -56,10 +56,11 @@ Four rules, non-negotiable from the first commit:
 ## What's built
 
 **Phase 1 — reconciliation.** Upload evidence (purchase orders,
-invoices, payment records) as PDFs. An LLM extracts structured fields
-from each (vendor, reference number, the *other* document's reference
-number it points back to, amount, date, approver) — schema-constrained
-output, same technique proven out in this stack's sibling invoicing
+invoices, payment records) as PDFs, photos, or screenshots. A PDF with
+a real text layer is read directly; a scanned PDF page or a JPG/PNG
+photo has no text layer at all, so it's handed to a vision-capable
+model instead — same schema, same output shape either way, same
+technique already proven out in this stack's sibling invoicing
 project. A deterministic engine then chains related documents together
 by reference number (PO → invoice → payment) and flags anything that
 doesn't chain cleanly: a missing reference, a reference to a document
@@ -157,10 +158,18 @@ created before this feature still show generic actors like `"human"`
   against an already-matched PO triggered this). Real limitation, not
   silently patched — aggregating invoices per PO is a natural next
   improvement to `reconciliation_service.py`, not done yet.
-- **No scanned/photographed evidence.** Only PDFs with a real text
-  layer. Vision-based extraction for scans is a known, straightforward
-  fast-follow (the technique is already proven elsewhere in this
-  stack) — left out here to keep each phase narrow.
+- **Vision extraction accuracy varies a lot by model.** Tested live: a
+  rendered scanned invoice fed to the local Ollama vision model
+  (`llava-phi3`, small, older) came back with a wrong doc_type, a
+  fabricated reference number, and a missed amount - genuinely poor
+  reading, not a bug in the surrounding code (confirmed by inspecting
+  the model's raw output directly). The same document against Groq's
+  larger hosted vision model (used automatically once `GROQ_API_KEY`
+  is set, e.g. on the deployed site) should be meaningfully more
+  reliable, but "meaningfully more reliable" still isn't "trustworthy
+  without a human checking it" - treat any vision-extracted evidence
+  record as a rough first draft a human should double-check against
+  the actual image, more so than text-extracted evidence.
 - **Authentication has no email verification, password reset, or
   login-attempt rate limiting.** Any email/password gets an account
   immediately; nothing stops repeated login guesses. Fine for a small
@@ -304,6 +313,15 @@ LLM-touching code with the model call mocked.
 redirect-when-logged-out behavior with its own `TestClient`, since
 `test_api.py` shares one already-logged-in client across its whole file.
 
+`test_pdf_text_service.py` covers the text/image gate (`has_extractable_text`)
+and the real PDF-to-PNG render (`render_pdf_page_to_image`) with actual
+PyMuPDF calls, no mocking. The vision half of
+`test_evidence_extraction_service.py` and three new cases in
+`test_orchestration_service.py` (scanned PDF succeeds via vision,
+scanned PDF fails when the vision model is unavailable, a direct image
+upload never touches the PDF text path at all) cover the vision
+extraction route with the model call mocked.
+
 Every feature here has also been verified **live**, not just against
 mocks: a real local model (phi3.5 via Ollama), a real running server,
 real generated PDFs uploaded through the actual routes and browser UI.
@@ -324,9 +342,9 @@ app/
   schemas/extraction.py              the schema the LLM's output is constrained to
   services/
     auth_service.py                  password hashing (PBKDF2-HMAC-SHA256)
-    llm_client.py                    Ollama/Groq switch, the only LLM seam
-    pdf_text_service.py              deterministic PDF text-layer extraction
-    evidence_extraction_service.py   LLM: document text -> structured evidence
+    llm_client.py                    Ollama/Groq switch (text + vision), the only LLM seam
+    pdf_text_service.py              deterministic PDF text extraction + PDF-to-image render
+    evidence_extraction_service.py   LLM (text or vision): document -> structured evidence
     reconciliation_service.py        deterministic: Phase 1's decision engine
     controls_testing_service.py      deterministic: Phase 2's decision engine
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call

@@ -78,3 +78,48 @@ def test_extract_evidence_normalizes_doc_type_and_currency_from_raw_llm_output(m
     result = svc.extract_evidence("some PO text")
     assert result.doc_type == "purchase_order"
     assert result.currency == "USD"
+
+
+# ----------------------------------------------------- extract_evidence_from_image
+
+def test_extract_evidence_from_image_success(monkeypatch):
+    payload = {
+        "doc_type": "invoice", "vendor_name": "Scanned Co", "reference_number": "INV-77",
+        "related_reference_number": None, "amount": 500.0, "currency": "USD",
+        "record_date": "2026-02-01", "approver_name": None,
+    }
+    captured = {}
+
+    def fake_chat_with_image(text, image_bytes, schema=None, temperature=0.0):
+        captured["image_bytes"] = image_bytes
+        captured["text"] = text
+        return json.dumps(payload)
+
+    monkeypatch.setattr(svc, "chat_with_image", fake_chat_with_image)
+
+    result = svc.extract_evidence_from_image(b"fake-png-bytes")
+    assert result.doc_type == "invoice"
+    assert result.vendor_name == "Scanned Co"
+    assert captured["image_bytes"] == b"fake-png-bytes"
+
+
+def test_extract_evidence_from_image_propagates_llm_unavailable(monkeypatch):
+    def boom(**kwargs):
+        raise LLMUnavailableError("vision model down")
+    monkeypatch.setattr(svc, "chat_with_image", boom)
+
+    with pytest.raises(LLMUnavailableError):
+        svc.extract_evidence_from_image(b"fake-png-bytes")
+
+
+def test_extract_evidence_from_image_normalizes_doc_type_same_as_text_path(monkeypatch):
+    payload = {
+        "doc_type": "Purchase Order", "vendor_name": "Vendor X", "reference_number": "PO-1",
+        "related_reference_number": None, "amount": 100.0, "currency": "unknown",
+        "record_date": None, "approver_name": None,
+    }
+    monkeypatch.setattr(svc, "chat_with_image", lambda **kwargs: json.dumps(payload))
+
+    result = svc.extract_evidence_from_image(b"fake-png-bytes")
+    assert result.doc_type == "purchase_order"
+    assert result.currency == "USD"

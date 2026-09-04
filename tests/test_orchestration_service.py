@@ -108,20 +108,74 @@ def test_run_document_pipeline_extraction_failure_skips_downstream_steps(monkeyp
     db.close()
 
 
-def test_run_document_pipeline_no_text_layer_is_skipped_not_failed(monkeypatch):
+def test_run_document_pipeline_scanned_pdf_falls_back_to_vision_and_succeeds(monkeypatch):
+    """No text layer used to mean SKIPPED and stop there. Now it means
+    'render the page and ask the vision model instead' - and if that
+    works, extraction is a real SUCCESS, not a dead end."""
     db = SessionLocal()
     engagement = make_engagement(db)
     document = make_document(db, engagement)
 
     monkeypatch.setattr(svc, "extract_text", lambda path: "")  # empty -> no extractable text
+    monkeypatch.setattr(svc, "render_pdf_page_to_image", lambda path: b"fake-rendered-png")
+    monkeypatch.setattr(svc, "extract_evidence_from_image", lambda image_bytes: LLMExtractedEvidence(
+        doc_type="invoice", vendor_name="Scanned Vendor", reference_number="INV-SCAN-1",
+        related_reference_number=None, amount=250.0, currency="USD", record_date=None, approver_name=None,
+    ))
 
     run = svc.run_document_pipeline(db, document, engagement)
 
-    assert run.steps[0].status == OrchestrationStepStatus.SKIPPED
-    # A correctly-identified "nothing to do" (scanned doc) is not a pipeline failure.
+    assert run.steps[0].status == OrchestrationStepStatus.SUCCESS
+    assert "INV-SCAN-1" in run.steps[0].detail
     assert run.status == OrchestrationRunStatus.COMPLETED
+    assert run.steps[1].status == OrchestrationStepStatus.SUCCESS  # 1 evidence record now exists
+    db.close()
+
+
+def test_run_document_pipeline_scanned_pdf_vision_unavailable_fails(monkeypatch):
+    from app.services.llm_client import LLMUnavailableError
+
+    db = SessionLocal()
+    engagement = make_engagement(db)
+    document = make_document(db, engagement)
+
+    monkeypatch.setattr(svc, "extract_text", lambda path: "")
+    monkeypatch.setattr(svc, "render_pdf_page_to_image", lambda path: b"fake-rendered-png")
+    def boom(image_bytes):
+        raise LLMUnavailableError("vision model down")
+    monkeypatch.setattr(svc, "extract_evidence_from_image", boom)
+
+    run = svc.run_document_pipeline(db, document, engagement)
+
+    assert run.steps[0].status == OrchestrationStepStatus.FAILED
+    assert run.status == OrchestrationRunStatus.FAILED
     assert run.steps[1].status == OrchestrationStepStatus.SKIPPED
-    assert run.steps[2].status == OrchestrationStepStatus.SKIPPED
+    db.close()
+
+
+def test_run_document_pipeline_image_upload_uses_vision_directly_not_pdf_text(monkeypatch, tmp_path):
+    """A directly-uploaded JPG/PNG should never go through extract_text()
+    at all - only through the vision path."""
+    db = SessionLocal()
+    engagement = make_engagement(db)
+    image_path = tmp_path / "photo.jpg"
+    image_path.write_bytes(b"fake-jpeg-bytes")
+    document = Document(engagement_id=engagement.id, client_id=engagement.client_id, filename="photo.jpg", file_path=str(image_path))
+    db.add(document)
+    db.commit()
+
+    def extract_text_should_not_be_called(path):
+        raise AssertionError("extract_text() should never be called for an image upload")
+    monkeypatch.setattr(svc, "extract_text", extract_text_should_not_be_called)
+    monkeypatch.setattr(svc, "extract_evidence_from_image", lambda image_bytes: LLMExtractedEvidence(
+        doc_type="invoice", vendor_name="Photo Vendor", reference_number="INV-PHOTO-1",
+        related_reference_number=None, amount=75.0, currency="USD", record_date=None, approver_name=None,
+    ))
+
+    run = svc.run_document_pipeline(db, document, engagement)
+
+    assert run.steps[0].status == OrchestrationStepStatus.SUCCESS
+    assert "INV-PHOTO-1" in run.steps[0].detail
     db.close()
 
 
