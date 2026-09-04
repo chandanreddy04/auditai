@@ -29,11 +29,12 @@ from sqlalchemy.orm import Session
 from app.core.config import UPLOAD_DIR
 from app.database.session import get_db
 from app.models.models import (
-    Client, Control, ControlRuleType, ControlTestResult, Document,
+    AuditFinding, Client, Control, ControlRuleType, ControlTestResult, Document,
     Engagement, EvidenceRecord, ExceptionStatus, FraudRiskFlag, PBCRequest, PBCStatus,
     ReconciliationException, User, Workpaper, WorkpaperStatus,
 )
 from app.services import audit_log_service
+from app.services import finding_assistant_service
 from app.services import orchestration_service
 from app.services import pbc_service
 from app.services import workpaper_service
@@ -125,13 +126,19 @@ def engagement_dashboard(
         .filter(FraudRiskFlag.engagement_id == engagement_id, FraudRiskFlag.status == ExceptionStatus.OPEN)
         .count()
     )
+    open_findings = (
+        db.query(AuditFinding)
+        .filter(AuditFinding.engagement_id == engagement_id, AuditFinding.status == ExceptionStatus.OPEN)
+        .count()
+    )
     evidence_count = db.query(EvidenceRecord).filter(EvidenceRecord.engagement_id == engagement_id).count()
     return templates.TemplateResponse(
         "engagement_dashboard.html",
         {
             "request": request, "engagement": engagement, "documents": documents,
             "open_exceptions": open_exceptions, "open_control_failures": open_control_failures,
-            "open_fraud_flags": open_fraud_flags, "evidence_count": evidence_count, "current_user": current_user,
+            "open_fraud_flags": open_fraud_flags, "open_findings": open_findings,
+            "evidence_count": evidence_count, "current_user": current_user,
         },
     )
 
@@ -267,6 +274,111 @@ def resolve_fraud_risk_flag(
         engagement_id=flag.engagement_id, client_id=flag.client_id,
     )
     return RedirectResponse(url=f"/engagements/{flag.engagement_id}/fraud-risk", status_code=303)
+
+
+# ------------------------------------------------------------ findings
+
+@router.get("/engagements/{engagement_id}/findings")
+def findings_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    engagement = _get_engagement_or_404(db, engagement_id)
+    open_findings = (
+        db.query(AuditFinding)
+        .filter(AuditFinding.engagement_id == engagement_id, AuditFinding.status == ExceptionStatus.OPEN)
+        .order_by(AuditFinding.risk_rating.desc(), AuditFinding.created_at)
+        .all()
+    )
+    closed_findings = (
+        db.query(AuditFinding)
+        .filter(AuditFinding.engagement_id == engagement_id, AuditFinding.status != ExceptionStatus.OPEN)
+        .order_by(AuditFinding.resolved_at.desc())
+        .limit(20)
+        .all()
+    )
+    return templates.TemplateResponse(
+        "findings.html",
+        {
+            "request": request, "engagement": engagement, "open_findings": open_findings,
+            "closed_findings": closed_findings, "current_user": current_user,
+        },
+    )
+
+
+@router.post("/engagements/{engagement_id}/findings/generate")
+def generate_findings(engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Gathers every not-yet-written-up exception/control-failure/fraud
+    flag (plain code decides which - see finding_assistant_service.py),
+    then makes one batched LLM call to write up the ones found. Safe to
+    click again later: already-written-up items are never re-drafted or
+    duplicated, only genuinely new candidates produce new findings."""
+    engagement = _get_engagement_or_404(db, engagement_id)
+
+    exceptions = db.query(ReconciliationException).filter(ReconciliationException.engagement_id == engagement_id).all()
+    control_results = db.query(ControlTestResult).filter(ControlTestResult.engagement_id == engagement_id).all()
+    fraud_flags = db.query(FraudRiskFlag).filter(FraudRiskFlag.engagement_id == engagement_id).all()
+    existing_findings = db.query(AuditFinding).filter(AuditFinding.engagement_id == engagement_id).all()
+
+    candidates = finding_assistant_service.gather_finding_candidates(
+        exceptions, control_results, fraud_flags, existing_findings,
+    )
+    if not candidates:
+        return RedirectResponse(url=f"/engagements/{engagement_id}/findings", status_code=303)
+
+    try:
+        drafted = finding_assistant_service.draft_findings(candidates)
+    except LLMUnavailableError as e:
+        audit_log_service.log(
+            db, actor="finding_assistant_service", action="finding_draft_failed", detail=str(e),
+            engagement_id=engagement_id, client_id=engagement.client_id,
+        )
+        raise HTTPException(503, f"AI finding drafting unavailable: {e}")
+
+    by_key = {c.source_key: c for c in candidates}
+    new_count = 0
+    for detail in drafted:
+        candidate = by_key.get(detail.source_key)
+        if candidate is None:
+            continue
+        db.add(AuditFinding(
+            engagement_id=engagement_id, client_id=engagement.client_id,
+            source_type=candidate.source_type, source_id=candidate.source_id,
+            title=detail.title, risk_rating=candidate.risk_rating,
+            root_cause=detail.root_cause, impact=detail.impact, recommendation=detail.recommendation,
+        ))
+        new_count += 1
+    db.commit()
+
+    audit_log_service.log(
+        db, actor="finding_assistant_service", action="findings_drafted",
+        detail=f"{len(candidates)} candidates, {new_count} findings drafted",
+        engagement_id=engagement_id, client_id=engagement.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{engagement_id}/findings", status_code=303)
+
+
+@router.post("/findings/{finding_id}/resolve")
+def resolve_finding(
+    finding_id: int, resolution_note: str = Form(""), action: str = Form("resolved"),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    finding = db.get(AuditFinding, finding_id)
+    if finding is None:
+        raise HTTPException(404, "Finding not found")
+
+    from datetime import datetime, timezone
+    finding.status = ExceptionStatus.RESOLVED if action == "resolved" else ExceptionStatus.DISMISSED
+    finding.resolved_by = current_user.name
+    finding.resolution_note = resolution_note.strip()
+    finding.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=current_user.name, action=f"finding_{finding.status.value}",
+        detail=f"#{finding.id}: {resolution_note.strip()}",
+        engagement_id=finding.engagement_id, client_id=finding.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{finding.engagement_id}/findings", status_code=303)
 
 
 # ----------------------------------------------------------------- controls

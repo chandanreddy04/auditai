@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Findings - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Findings</p>
+<h1>Audit findings</h1>
+<p class="subtle">
+    Every finding here started as something a deterministic engine already flagged - a reconciliation exception, a
+    failed control test, or a fraud-risk flag. AI only writes up the root cause / impact / recommendation prose from
+    those already-decided facts; the risk rating is assigned by plain code, never the model. Only a human resolves or
+    dismisses one.
+</p>
+
+<form method="post" action="/engagements/{{ engagement.id }}/findings/generate" class="inline-form">
+    <button type="submit">Generate findings</button>
+    <span class="subtle small">Drafts findings for any exception, control failure, or fraud flag not yet written up - safe to click again, already-drafted items are never duplicated.</span>
+</form>
+
+<h2>Open ({{ open_findings|length }})</h2>
+{% for finding in open_findings %}
+<div class="exception-card severity-{{ finding.risk_rating.value }}">
+    <div class="exception-head">
+        <span class="badge">{{ finding.source_type.value }}</span>
+        <span class="badge severity-badge">{{ finding.risk_rating.value }} risk</span>
+    </div>
+    <h3 style="margin: 4px 0;">{{ finding.title }}</h3>
+    <p><strong>Root cause:</strong> {{ finding.root_cause }}</p>
+    <p><strong>Impact:</strong> {{ finding.impact }}</p>
+    <p><strong>Recommendation:</strong> {{ finding.recommendation }}</p>
+    <form method="post" action="/findings/{{ finding.id }}/resolve" class="inline-form">
+        <input type="text" name="resolution_note" placeholder="Resolution note (what was done?)">
+        <button type="submit" name="action" value="resolved">Resolve</button>
+        <button type="submit" name="action" value="dismissed" class="secondary">Dismiss</button>
+    </form>
+</div>
+{% else %}
+<p class="empty">No open findings - nothing written up yet, or everything's been resolved.</p>
+{% endfor %}
+
+<h2>Recently closed</h2>
+<table class="list">
+    <thead><tr><th>Title</th><th>Risk</th><th>Closed by</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for finding in closed_findings %}
+        <tr>
+            <td>{{ finding.title }} <span class="subtle small">{{ finding.status.value }}</span></td>
+            <td>{{ finding.risk_rating.value }}</td>
+            <td>{{ finding.resolved_by }}</td>
+            <td>{{ finding.resolution_note }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing closed yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

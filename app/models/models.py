@@ -339,6 +339,50 @@ class FraudRiskFlag(Base):
     resolved_at = Column(DateTime, nullable=True)
 
 
+class FindingSourceType(str, enum.Enum):
+    """What kind of already-decided item a finding was written up from -
+    never a finding invented from nothing. See AuditFinding's docstring."""
+    RECONCILIATION_EXCEPTION = "reconciliation_exception"
+    CONTROL_FAILURE = "control_failure"
+    FRAUD_RISK_FLAG = "fraud_risk_flag"
+
+
+class FindingRiskRating(str, enum.Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class AuditFinding(Base):
+    """A structured finding - title / risk rating / root cause / impact
+    / recommendation - per the blueprint's Audit Finding Assistant spec.
+    Every row traces back to exactly one candidate a deterministic
+    engine already raised (source_type + source_id point at a specific
+    ReconciliationException, ControlTestResult, or FraudRiskFlag row) -
+    finding_assistant_service.py never invents one from nothing, it only
+    writes up prose for something already flagged. risk_rating is set by
+    plain code, not the model - see that file's own docstring for why.
+    Same open/resolved/dismissed review-queue discipline as every other
+    flag in this app: only a named human closes one."""
+    __tablename__ = "audit_findings"
+
+    id = Column(Integer, primary_key=True)
+    engagement_id = Column(Integer, ForeignKey("engagements.id"), nullable=False, index=True)
+    client_id = Column(Integer, ForeignKey("clients.id"), nullable=False, index=True)
+    source_type = Column(Enum(FindingSourceType), nullable=False)
+    source_id = Column(Integer, nullable=False)
+    title = Column(String(300), nullable=False)
+    risk_rating = Column(Enum(FindingRiskRating), nullable=False)
+    root_cause = Column(Text, nullable=False)
+    impact = Column(Text, nullable=False)
+    recommendation = Column(Text, nullable=False)
+    status = Column(Enum(ExceptionStatus), default=ExceptionStatus.OPEN)
+    resolved_by = Column(String(200), nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_now)
+    resolved_at = Column(DateTime, nullable=True)
+
+
 class OrchestrationTrigger(str, enum.Enum):
     DOCUMENT_UPLOAD = "document_upload"
     MANUAL = "manual"

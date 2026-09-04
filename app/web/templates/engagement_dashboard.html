@@ -16,11 +16,15 @@
     <div class="stat {{ 'stat-alert' if open_fraud_flags else '' }}">
         <span class="stat-num">{{ open_fraud_flags }}</span><span class="stat-label">open fraud-risk flags</span>
     </div>
+    <div class="stat {{ 'stat-alert' if open_findings else '' }}">
+        <span class="stat-num">{{ open_findings }}</span><span class="stat-label">open findings</span>
+    </div>
 </div>
 
 <p>
     <a href="/engagements/{{ engagement.id }}/exceptions" class="button">Review exceptions &rarr;</a>
     <a href="/engagements/{{ engagement.id }}/fraud-risk" class="button secondary">Fraud-risk flags &rarr;</a>
+    <a href="/engagements/{{ engagement.id }}/findings" class="button secondary">Audit findings &rarr;</a>
     <a href="/engagements/{{ engagement.id }}/controls" class="button secondary">Controls testing &rarr;</a>
     <a href="/engagements/{{ engagement.id }}/workpaper" class="button secondary">Workpaper draft &rarr;</a>
     <a href="/engagements/{{ engagement.id }}/pbc" class="button secondary">PBC tracking &rarr;</a>

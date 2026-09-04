@@ -283,6 +283,104 @@ def test_fraud_risk_flow():
     assert "Closed" in resp.text
 
 
+def test_finding_assistant_flow(monkeypatch):
+    from app.database.session import SessionLocal
+    from app.models.models import AuditFinding, Client, Document, DocumentType, Engagement, EvidenceRecord, ExceptionType, ReconciliationException
+    from app.services import finding_assistant_service
+    from app.web import routes as routes_module
+
+    def fake_draft(candidates):
+        return [
+            finding_assistant_service.LLMFindingDetail(
+                source_key=c.source_key,
+                title=f"Finding for {c.source_key}",
+                root_cause="Root cause from the given facts.",
+                impact="Impact on the audit.",
+                recommendation="Recommended remediation.",
+            )
+            for c in candidates
+        ]
+    monkeypatch.setattr(routes_module.finding_assistant_service, "draft_findings", fake_draft)
+
+    client.post("/clients", data={"name": "Finding Assistant Test Corp"}, follow_redirects=False)
+    db = SessionLocal()
+    acme = db.query(Client).filter(Client.name == "Finding Assistant Test Corp").first()
+    db.close()
+
+    client.post(
+        f"/clients/{acme.id}/engagements",
+        data={"name": "Finding Assistant Engagement", "audit_type": "financial"},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    engagement = db.query(Engagement).filter(Engagement.client_id == acme.id).first()
+    db.close()
+
+    # No candidates yet -> generating produces nothing, no crash.
+    resp = client.post(f"/engagements/{engagement.id}/findings/generate", follow_redirects=False)
+    assert resp.status_code == 303
+    resp = client.get(f"/engagements/{engagement.id}/findings")
+    assert "Open (0)" in resp.text
+
+    # Seed one open reconciliation exception directly (bypassing the reconciliation engine).
+    db = SessionLocal()
+    doc = Document(engagement_id=engagement.id, client_id=acme.id, filename="inv.pdf", file_path="x")
+    db.add(doc)
+    db.commit()
+    record = EvidenceRecord(document_id=doc.id, engagement_id=engagement.id, client_id=acme.id, doc_type=DocumentType.INVOICE, amount=500.0)
+    db.add(record)
+    db.commit()
+    exc = ReconciliationException(
+        engagement_id=engagement.id, client_id=acme.id, exception_type=ExceptionType.MISSING_MATCH,
+        description="Invoice has no matching PO.", evidence_record_ids=str(record.id),
+    )
+    db.add(exc)
+    db.commit()
+    exc_id = exc.id
+    db.close()
+
+    resp = client.post(f"/engagements/{engagement.id}/findings/generate", follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = client.get(f"/engagements/{engagement.id}/findings")
+    assert resp.status_code == 200
+    assert "Open (1)" in resp.text
+    assert f"Finding for reconciliation_exception:{exc_id}" in resp.text
+    assert "high risk" in resp.text  # missing_match maps to high
+
+    db = SessionLocal()
+    finding = db.query(AuditFinding).filter(AuditFinding.engagement_id == engagement.id).first()
+    db.close()
+    assert finding is not None
+    assert finding.source_id == exc_id
+
+    # Generating again does not duplicate the same finding.
+    resp = client.post(f"/engagements/{engagement.id}/findings/generate", follow_redirects=False)
+    assert resp.status_code == 303
+    db = SessionLocal()
+    count = db.query(AuditFinding).filter(AuditFinding.engagement_id == engagement.id).count()
+    db.close()
+    assert count == 1
+
+    resp = client.post(
+        f"/findings/{finding.id}/resolve",
+        data={"resolution_note": "Obtained the missing PO.", "action": "resolved"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    resolved = db.get(AuditFinding, finding.id)
+    db.close()
+    assert resolved.status.value == "resolved"
+    assert resolved.resolved_by == "Test Auditor"
+
+    resp = client.get(f"/engagements/{engagement.id}/findings")
+    assert "Open (0)" in resp.text
+    assert "Obtained the missing PO." in resp.text
+
+
 def test_pbc_flow(monkeypatch):
     from datetime import date, timedelta
 

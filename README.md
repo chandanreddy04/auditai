@@ -21,18 +21,21 @@ Phase 4: PBC / request tracking                                                 
 Phase 5: multi-agent orchestration across all of the above                                                [done]
 ```
 
-Beyond that original 5-phase roadmap, three more pieces have since been
+Beyond that original 5-phase roadmap, four more pieces have since been
 added: **real user accounts** (signup/login/logout) replacing the
 typed-name fields the five phases originally used for "who did this";
-**vision extraction** for scanned documents and photos; and the
-**Anomaly / Fraud-Risk Detection Agent** below. A later, more detailed
-revision of the requirements document named 12 specific agents in
-total (not just the 5 phases) - as of the fraud-risk agent, **5 of
-those 12 are built**: Evidence Extraction, Reconciliation, Controls
-Testing, Workpaper Drafting, and now Anomaly/Fraud-Risk Detection. The
-other 7 (Transaction Testing, Policy/Knowledge (RAG), Audit Finding
-Assistant, Follow-up/Remediation, Auditor Research Copilot, and full
-Document Intake / PBC lifecycles) are not built yet.
+**vision extraction** for scanned documents and photos; the
+**Anomaly / Fraud-Risk Detection Agent**; and the **Audit Finding
+Assistant**, both below. A later, more detailed revision of the
+requirements document named 12 specific agents in total (not just the
+5 phases) - as of the finding assistant, **6 of those 12 are built**:
+Evidence Extraction, Reconciliation, Controls Testing, Workpaper
+Drafting, Anomaly/Fraud-Risk Detection, and now Audit Finding
+Assistant. Two more are partially built (Document Intake and Audit
+Request/PBC tracking cover the basics but not the blueprint's full
+scope). The remaining four - Transaction Testing, Policy/Knowledge
+(RAG), Follow-up/Remediation, and Auditor Research Copilot - are not
+built yet.
 
 ## Why it's built this way
 
@@ -172,6 +175,31 @@ a weekend-dated document, and a vendor's only appearance in the
 engagement above a materiality threshold. Every flag is a prompt for a
 human to look closer, never a conclusion, and sits in the same kind of
 review queue as every other flag in this app.
+
+**Audit Finding Assistant.** Turns an already-detected issue - a
+reconciliation exception, a failed control test, or a fraud-risk flag -
+into a structured finding: title, risk rating, root cause, impact,
+recommendation, per the blueprint's own spec
+([`finding_assistant_service.py`](app/services/finding_assistant_service.py)).
+Same two-layer split as workpaper drafting: plain code decides WHICH
+items are worth a finding (anything open or resolved, never dismissed,
+that doesn't already have one) and assigns the risk rating from a
+fixed lookup table - never the model, since severity is exactly the
+kind of consequential judgment call this project has never handed to
+an LLM. One batched AI call then writes up root cause/impact/
+recommendation prose for every candidate, using only the facts already
+on file - never asked to invent a finding or judge severity. Manually
+triggered (a "Generate findings" button), not part of the automatic
+upload pipeline, same reasoning as workpaper drafting: it's a slow LLM
+call that should run "when I'm ready," not on every single upload.
+Re-running is always safe - already-drafted findings are never
+duplicated or redrafted, only genuinely new candidates produce new
+findings. Verified live against a real local server: a real invoice
+with no PO produced one fraud-risk flag and one failed control, and
+generating findings produced two well-grounded, non-hallucinated
+findings (correct risk ratings, no invented facts), regenerating
+created zero duplicates, and resolving one updated the queue and audit
+trail correctly.
 
 ## Known limitations (found via live testing, not yet fixed)
 
@@ -346,9 +374,11 @@ pytest
 
 `test_reconciliation_service.py`, `test_controls_testing_service.py`,
 `test_fraud_risk_service.py`, `test_pbc_service.py`, and the
-summary-building half of `test_workpaper_service.py` cover the five
+summary-building half of `test_workpaper_service.py` cover five
 decision/summary engines with zero LLM calls — pure input/output,
-deterministic, fast. `test_orchestration_service.py` covers the
+deterministic, fast. `test_finding_assistant_service.py` covers the
+sixth (candidate-gathering and risk-rating rules with zero LLM calls;
+the one drafting call is exercised separately with the LLM mocked). `test_orchestration_service.py` covers the
 coordination logic itself (step ordering, skip-on-failure, run-status
 rollup) with the LLM-touching extraction call mocked. `test_api.py`
 exercises the full route flow (clients, engagements, uploads,
@@ -387,7 +417,7 @@ app/
   core/config.py                     settings, one seam for the environment
   models/models.py                   User, Client, Engagement, Document, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
-                                      Workpaper, PBCRequest, FraudRiskFlag,
+                                      Workpaper, PBCRequest, FraudRiskFlag, AuditFinding,
                                       OrchestrationRun, OrchestrationStep, AuditLogEntry
   database/session.py                engine, session factory, get_db()
   schemas/extraction.py              the schema the LLM's output is constrained to
@@ -399,6 +429,7 @@ app/
     reconciliation_service.py        deterministic: Phase 1's decision engine
     controls_testing_service.py      deterministic: Phase 2's decision engine
     fraud_risk_service.py            deterministic: pattern-based risk-flag engine, zero LLM
+    finding_assistant_service.py     deterministic candidate/risk-rating logic + one batched LLM call
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
     pbc_service.py                   deterministic overdue calc + Phase 4's one LLM call
     orchestration_service.py         Phase 5: coordinates the agents above, logs every step
@@ -422,6 +453,6 @@ ten autonomous agents — start with one narrow, measurable workflow and
 make it reliable, secure, and explainable, then add capabilities in
 phases."* This repo is that recommendation, built one phase at a time -
 all five planned phases now complete, plus real authentication, vision
-extraction, and the Anomaly/Fraud-Risk Detection Agent added as
-follow-ups, 120 tests passing, every feature verified live against a
-real model, not just against mocks.
+extraction, the Anomaly/Fraud-Risk Detection Agent, and the Audit
+Finding Assistant added as follow-ups, 135 tests passing, every
+feature verified live against a real model, not just against mocks.
