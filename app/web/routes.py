@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.core.config import UPLOAD_DIR
 from app.database.session import get_db
 from app.models.models import (
-    AuditFinding, Client, Control, ControlRuleType, ControlTestResult, Document,
+    AuditArea, AuditFinding, Client, Control, ControlRuleType, ControlTestResult, Document,
     Engagement, EvidenceRecord, ExceptionStatus, FraudRiskFlag, PBCRequest, PBCStatus,
     ReconciliationException, User, Workpaper, WorkpaperStatus,
 )
@@ -168,6 +168,29 @@ async def upload_document(
     orchestration_service.run_document_pipeline(db, document, engagement)
 
     return RedirectResponse(url=f"/engagements/{engagement_id}", status_code=303)
+
+
+# --------------------------------------------------------- evidence folders
+
+@router.get("/engagements/{engagement_id}/evidence-folders")
+def evidence_folders_page(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    """Document Intake Agent's own UI: the "evidence folder" view the
+    blueprint names explicitly, grouping documents by the audit_area
+    document_intake_service.py routed each one into - rather than the
+    flat upload list the dashboard already shows."""
+    engagement = _get_engagement_or_404(db, engagement_id)
+    documents = db.query(Document).filter(Document.engagement_id == engagement_id).order_by(Document.filename).all()
+
+    folders: dict[AuditArea, list[Document]] = {area: [] for area in AuditArea}
+    for d in documents:
+        folders[d.audit_area or AuditArea.UNCATEGORIZED].append(d)
+
+    return templates.TemplateResponse(
+        "evidence_folders.html",
+        {"request": request, "engagement": engagement, "folders": folders, "current_user": current_user},
+    )
 
 
 # -------------------------------------------------------- exception queue
@@ -574,15 +597,20 @@ def pbc_page(
     today = date.today()
     pbc_like = [pbc_service.PBCLike(id=r.id, item_name=r.item_name, due_date=r.due_date, status=r.status.value) for r in requests_]
     overdue_ids = {o.id for o in pbc_service.find_overdue(pbc_like, today)}
+    labels = {r.id: pbc_service.lifecycle_label(pl, today) for r, pl in zip(requests_, pbc_like)}
 
-    open_requests = [r for r in requests_ if r.status == PBCStatus.REQUESTED]
-    closed_requests = [r for r in requests_ if r.status != PBCStatus.REQUESTED]
+    # OPEN = still needs a human action to close out (requested/waiting/
+    # missing, received-but-not-yet-validated, or flagged for follow-up).
+    # CLOSED = actually done (validated) or deliberately not needed (waived).
+    open_statuses = (PBCStatus.REQUESTED, PBCStatus.RECEIVED, PBCStatus.FOLLOW_UP)
+    open_requests = [r for r in requests_ if r.status in open_statuses]
+    closed_requests = [r for r in requests_ if r.status not in open_statuses]
 
     return templates.TemplateResponse(
         "pbc.html",
         {
             "request": request, "engagement": engagement, "open_requests": open_requests,
-            "closed_requests": closed_requests, "overdue_ids": overdue_ids, "documents": documents,
+            "closed_requests": closed_requests, "overdue_ids": overdue_ids, "labels": labels, "documents": documents,
             "has_overdue": bool(overdue_ids), "reminder_draft": None, "current_user": current_user,
         },
     )
@@ -659,6 +687,64 @@ def waive_pbc_request(
     return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
 
 
+@router.post("/pbc/{request_id}/validate")
+def validate_pbc_request(
+    request_id: int, resolution_note: str = Form(""), db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    """The blueprint's own "validated" stage: a received item isn't done
+    just because the client sent something - a human has to actually
+    look at it and confirm it's adequate evidence. Only meaningful on a
+    RECEIVED item; nothing here re-checks the evidence itself, that
+    judgment stays entirely human, same as every other closure in this app."""
+    from datetime import datetime, timezone
+
+    req = db.get(PBCRequest, request_id)
+    if req is None:
+        raise HTTPException(404, "PBC request not found")
+    if req.status != PBCStatus.RECEIVED:
+        raise HTTPException(400, "Only a received item can be validated.")
+
+    req.status = PBCStatus.VALIDATED
+    req.resolved_by = current_user.name
+    req.resolution_note = resolution_note.strip() or req.resolution_note
+    req.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=current_user.name, action="pbc_validated", detail=f"{req.item_name}: {req.resolution_note or ''}",
+        engagement_id=req.engagement_id, client_id=req.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
+
+
+@router.post("/pbc/{request_id}/flag-follow-up")
+def flag_pbc_follow_up(
+    request_id: int, resolution_note: str = Form(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    """The blueprint's "follow-up" stage: an explicit human flag that
+    this item needs chasing beyond a generic overdue reminder - either
+    a received response was inadequate, or a missing item needs
+    escalating. Stays open (shown alongside requested/received) until a
+    human moves it to validated or waived - a flag is never a closure."""
+    from datetime import datetime, timezone
+
+    req = db.get(PBCRequest, request_id)
+    if req is None:
+        raise HTTPException(404, "PBC request not found")
+
+    req.status = PBCStatus.FOLLOW_UP
+    req.resolved_by = current_user.name
+    req.resolution_note = resolution_note.strip()
+    req.resolved_at = datetime.now(timezone.utc)
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=current_user.name, action="pbc_follow_up_flagged", detail=f"{req.item_name}: {req.resolution_note}",
+        engagement_id=req.engagement_id, client_id=req.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{req.engagement_id}/pbc", status_code=303)
+
+
 @router.post("/engagements/{engagement_id}/pbc/draft-reminder")
 def draft_pbc_reminder(
     request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
@@ -692,14 +778,16 @@ def draft_pbc_reminder(
             reminder_draft = f"(AI drafting unavailable: {e})"
 
     overdue_ids = {o.id for o in overdue}
-    open_requests = [r for r in requests_ if r.status == PBCStatus.REQUESTED]
-    closed_requests = [r for r in requests_ if r.status != PBCStatus.REQUESTED]
+    labels = {r.id: pbc_service.lifecycle_label(pl, today) for r, pl in zip(requests_, pbc_like)}
+    open_statuses = (PBCStatus.REQUESTED, PBCStatus.RECEIVED, PBCStatus.FOLLOW_UP)
+    open_requests = [r for r in requests_ if r.status in open_statuses]
+    closed_requests = [r for r in requests_ if r.status not in open_statuses]
 
     return templates.TemplateResponse(
         "pbc.html",
         {
             "request": request, "engagement": engagement, "open_requests": open_requests,
-            "closed_requests": closed_requests, "overdue_ids": overdue_ids, "documents": documents,
+            "closed_requests": closed_requests, "overdue_ids": overdue_ids, "labels": labels, "documents": documents,
             "has_overdue": bool(overdue_ids), "reminder_draft": reminder_draft, "current_user": current_user,
         },
     )

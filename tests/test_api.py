@@ -461,10 +461,56 @@ def test_pbc_flow(monkeypatch):
     assert bank_item.status.value == "received"
     assert lease_item.status.value == "waived"
 
+    # A received item isn't closed yet - it's still open, waiting on a human to validate it.
     resp = client.get(f"/engagements/{engagement.id}/pbc")
     assert resp.status_code == 200
+    assert "Open requests (1)" in resp.text
+    assert "Closed (1)" in resp.text
+
+    # Validating it closes it out for real.
+    resp = client.post(
+        f"/pbc/{bank_item.id}/validate",
+        data={"resolution_note": "Confirmed against the general ledger"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    bank_item = db.get(PBCRequest, bank_item.id)
+    db.close()
+    assert bank_item.status.value == "validated"
+
+    resp = client.get(f"/engagements/{engagement.id}/pbc")
     assert "Open requests (0)" in resp.text
     assert "Closed (2)" in resp.text
+
+    # Flag-follow-up on a fresh request moves it into the open, needs-attention bucket.
+    client.post(
+        f"/engagements/{engagement.id}/pbc",
+        data={"item_name": "Payroll register", "due_date": future_due},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    payroll_item = db.query(PBCRequest).filter(PBCRequest.item_name == "Payroll register").first()
+    db.close()
+
+    resp = client.post(
+        f"/pbc/{payroll_item.id}/flag-follow-up",
+        data={"resolution_note": "Client sent an incomplete register - missing December"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    payroll_item = db.get(PBCRequest, payroll_item.id)
+    db.close()
+    assert payroll_item.status.value == "follow_up"
+
+    resp = client.get(f"/engagements/{engagement.id}/pbc")
+    assert "Open requests (1)" in resp.text
+    assert "follow_up" in resp.text
 
 
 def test_orchestration_flow(monkeypatch):
@@ -514,6 +560,7 @@ def test_orchestration_flow(monkeypatch):
     resp = client.get(f"/engagements/{engagement.id}/orchestration")
     assert resp.status_code == 200
     assert "document_upload" in resp.text
+    assert "document_intake_step" in resp.text
     assert "evidence_extraction_step" in resp.text
     assert "reconciliation_step" in resp.text
     assert "fraud_risk_step" in resp.text
@@ -524,7 +571,7 @@ def test_orchestration_flow(monkeypatch):
     assert run is not None
     assert run.trigger.value == "document_upload"
     assert run.triggered_by == "orch_test.pdf"
-    assert len(run.steps) == 4
+    assert len(run.steps) == 5
     db.close()
 
     # Manual full-check trigger.

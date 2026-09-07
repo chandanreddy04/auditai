@@ -97,10 +97,29 @@ class DocumentStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class AuditArea(str, enum.Enum):
+    """The "evidence folder" a document gets routed into - the blueprint's
+    own Document Intake Agent spec ("routes each document to the correct
+    client, engagement, audit area, and evidence folder"). A fixed,
+    deterministic lookup from doc_type (see document_intake_service.py) -
+    zero LLM, zero judgment call. Deliberately thin right now: this app's
+    evidence types are all purchase-order/invoice/payment/bank-statement,
+    so most documents land in VENDOR_PAYMENTS or BANKING_CASH today -
+    genuinely covering the blueprint's fuller list (payroll, inventory,
+    journal entries, user access) needs those evidence types to exist
+    first, which is future scope, not a shortcut taken here."""
+    VENDOR_PAYMENTS = "vendor_payments"
+    BANKING_CASH = "banking_cash"
+    UNCATEGORIZED = "uncategorized"
+
+
 class Document(Base):
     """One uploaded piece of evidence (a PDF, for Phase 1). client_id is
     copied down from the engagement at write time - denormalized on
-    purpose, see the module docstring."""
+    purpose, see the module docstring. audit_area starts UNCATEGORIZED
+    at intake (before anyone knows what the document even is) and gets
+    refined once evidence extraction determines doc_type - see
+    document_intake_service.py."""
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True)
@@ -110,6 +129,7 @@ class Document(Base):
     file_path = Column(String(500), nullable=False)
     doc_type = Column(Enum(DocumentType), default=DocumentType.UNKNOWN)
     status = Column(Enum(DocumentStatus), default=DocumentStatus.UPLOADED)
+    audit_area = Column(Enum(AuditArea), default=AuditArea.UNCATEGORIZED)
     raw_text = Column(Text, nullable=True)
     failure_reason = Column(String(500), nullable=True)
     uploaded_at = Column(DateTime, default=_now)
@@ -268,10 +288,24 @@ class Workpaper(Base):
 class PBCStatus(str, enum.Enum):
     """PBC = "Provided By Client" - the auditor's own term for a request
     sent to the client (a document, a schedule, an explanation) that
-    the client, not the auditor, has to fulfill."""
-    REQUESTED = "requested"
-    RECEIVED = "received"
-    WAIVED = "waived"  # the auditor decided this item is no longer needed
+    the client, not the auditor, has to fulfill.
+
+    The blueprint's own spec names six stages: requested -> waiting ->
+    received -> validated -> missing -> follow-up. Five are real, stored
+    states below; "waiting" and "missing" are deliberately NOT separate
+    stored states - they're the same REQUESTED status, just labeled by
+    whether due_date has passed yet (see pbc_service.lifecycle_label()) -
+    the exact same "compute fresh, never store, never drifts out of
+    date" choice this file already made for "overdue," just renamed to
+    match the blueprint's vocabulary. WAIVED is this app's own addition
+    beyond the blueprint's six, kept because it's a real, distinct
+    outcome (the auditor decided the item is no longer needed) that
+    doesn't fit any of the six."""
+    REQUESTED = "requested"    # covers both "requested" and "waiting" (not yet due) / "missing" (past due) - see lifecycle_label()
+    RECEIVED = "received"      # the client provided something, but no one has confirmed it's adequate yet
+    VALIDATED = "validated"    # a human auditor reviewed the received item and confirmed it's acceptable evidence
+    FOLLOW_UP = "follow_up"    # a human flagged this item as needing an explicit chase - inadequate response, or a missing item that needs escalating
+    WAIVED = "waived"          # the auditor decided this item is no longer needed
 
 
 class PBCRequest(Base):

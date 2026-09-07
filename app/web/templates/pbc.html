@@ -3,7 +3,7 @@
 {% block content %}
 <p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / PBC tracking</p>
 <h1>PBC (Provided-By-Client) tracking</h1>
-<p class="subtle">Items requested from the client for this engagement. "Overdue" is computed live from the due date, not stored - it's always accurate. Only a human marks an item received or waived.</p>
+<p class="subtle">Items requested from the client for this engagement, tracked through the full requested &rarr; waiting/missing &rarr; received &rarr; validated &rarr; follow-up lifecycle. "Waiting" vs "missing" is computed live from the due date, not stored - it's always accurate. Only a human marks an item received, validated, flagged for follow-up, or waived.</p>
 
 {% if reminder_draft %}
 <div class="exception-card severity-medium">
@@ -21,8 +21,9 @@
         <tr>
             <td>{{ r.item_name }}{% if r.description %}<div class="subtle small">{{ r.description }}</div>{% endif %}</td>
             <td>{{ r.due_date.strftime("%Y-%m-%d") if r.due_date else "-" }}</td>
-            <td>{% if r.id in overdue_ids %}<span class="badge badge-failed">overdue</span>{% else %}<span class="badge">requested</span>{% endif %}</td>
+            <td><span class="badge {{ 'badge-failed' if labels[r.id] == 'missing' else '' }}">{{ labels[r.id] }}</span></td>
             <td>
+                {% if r.status.value == "requested" %}
                 <form method="post" action="/pbc/{{ r.id }}/receive" class="inline-form">
                     <select name="linked_document_id">
                         <option value="">no linked document</option>
@@ -31,6 +32,18 @@
                     <input type="text" name="resolution_note" placeholder="Note (optional)">
                     <button type="submit">Mark received</button>
                 </form>
+                {% elif r.status.value == "received" %}
+                <form method="post" action="/pbc/{{ r.id }}/validate" class="inline-form">
+                    <input type="text" name="resolution_note" placeholder="Validation note (optional)">
+                    <button type="submit">Validate</button>
+                </form>
+                {% endif %}
+                {% if r.status.value != "follow_up" %}
+                <form method="post" action="/pbc/{{ r.id }}/flag-follow-up" class="inline-form">
+                    <input type="text" name="resolution_note" placeholder="Why does this need follow-up?" required>
+                    <button type="submit" class="secondary">Flag follow-up</button>
+                </form>
+                {% endif %}
                 <form method="post" action="/pbc/{{ r.id }}/waive" class="inline-form">
                     <input type="text" name="resolution_note" placeholder="Why waived?" required>
                     <button type="submit" class="secondary">Waive</button>
@@ -64,7 +77,7 @@
     {% for r in closed_requests %}
         <tr>
             <td>{{ r.item_name }}{% if r.linked_document %}<div class="subtle small">linked: {{ r.linked_document.filename }}</div>{% endif %}</td>
-            <td><span class="badge {{ 'badge-extracted' if r.status.value == 'received' else '' }}">{{ r.status.value }}</span></td>
+            <td><span class="badge {{ 'badge-extracted' if r.status.value == 'validated' else '' }}">{{ r.status.value }}</span></td>
             <td>{{ r.resolution_note or "" }}</td>
             <td>{{ r.resolved_by }}</td>
         </tr>

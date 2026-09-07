@@ -34,7 +34,7 @@ def make_document(db, engagement, filename="test.pdf"):
     return doc
 
 
-def test_run_document_pipeline_success_runs_all_four_steps_in_order(monkeypatch):
+def test_run_document_pipeline_success_runs_all_five_steps_in_order(monkeypatch):
     db = SessionLocal()
     engagement = make_engagement(db)
     document = make_document(db, engagement)
@@ -50,19 +50,23 @@ def test_run_document_pipeline_success_runs_all_four_steps_in_order(monkeypatch)
     assert run.trigger == OrchestrationTrigger.DOCUMENT_UPLOAD
     assert run.triggered_by == "test.pdf"
     assert run.status == OrchestrationRunStatus.COMPLETED
-    assert len(run.steps) == 4
+    assert len(run.steps) == 5
     assert [s.agent_name for s in run.steps] == [
-        "evidence_extraction_step", "reconciliation_step", "fraud_risk_step", "controls_testing_step",
+        "document_intake_step", "evidence_extraction_step", "reconciliation_step", "fraud_risk_step", "controls_testing_step",
     ]
-    assert [s.step_order for s in run.steps] == [1, 2, 3, 4]
+    assert [s.step_order for s in run.steps] == [1, 2, 3, 4, 5]
     assert run.steps[0].status == OrchestrationStepStatus.SUCCESS
-    assert run.steps[1].status == OrchestrationStepStatus.SUCCESS       # 1 evidence record now exists -> reconciliation runs
-    assert run.steps[2].status == OrchestrationStepStatus.SUCCESS       # fraud-risk always runs when evidence exists
-    assert run.steps[3].status == OrchestrationStepStatus.SKIPPED       # no controls defined for this engagement
+    assert run.steps[1].status == OrchestrationStepStatus.SUCCESS
+    assert run.steps[2].status == OrchestrationStepStatus.SUCCESS       # 1 evidence record now exists -> reconciliation runs
+    assert run.steps[3].status == OrchestrationStepStatus.SUCCESS       # fraud-risk always runs when evidence exists
+    assert run.steps[4].status == OrchestrationStepStatus.SKIPPED       # no controls defined for this engagement
 
     evidence = db.query(EvidenceRecord).filter(EvidenceRecord.document_id == document.id).first()
     assert evidence is not None
     assert evidence.reference_number == "INV-1"
+
+    db.refresh(document)
+    assert document.audit_area.value == "vendor_payments"
     db.close()
 
 
@@ -82,9 +86,9 @@ def test_run_document_pipeline_with_active_control_reports_success(monkeypatch):
     run = svc.run_document_pipeline(db, document, engagement)
 
     assert run.status == OrchestrationRunStatus.COMPLETED
-    assert run.steps[3].agent_name == "controls_testing_step"
-    assert run.steps[3].status == OrchestrationStepStatus.SUCCESS
-    assert "1 results" in run.steps[3].detail
+    assert run.steps[4].agent_name == "controls_testing_step"
+    assert run.steps[4].status == OrchestrationStepStatus.SUCCESS
+    assert "1 results" in run.steps[4].detail
     db.close()
 
 
@@ -103,12 +107,13 @@ def test_run_document_pipeline_extraction_failure_skips_downstream_steps(monkeyp
     run = svc.run_document_pipeline(db, document, engagement)
 
     assert run.status == OrchestrationRunStatus.FAILED
-    assert len(run.steps) == 4
-    assert run.steps[0].status == OrchestrationStepStatus.FAILED
-    assert run.steps[1].status == OrchestrationStepStatus.SKIPPED
+    assert len(run.steps) == 5
+    assert run.steps[0].status == OrchestrationStepStatus.SUCCESS       # document intake always succeeds
+    assert run.steps[1].status == OrchestrationStepStatus.FAILED
     assert run.steps[2].status == OrchestrationStepStatus.SKIPPED
     assert run.steps[3].status == OrchestrationStepStatus.SKIPPED
-    assert "extraction did not succeed" in run.steps[1].detail
+    assert run.steps[4].status == OrchestrationStepStatus.SKIPPED
+    assert "extraction did not succeed" in run.steps[2].detail
     db.close()
 
 
@@ -129,10 +134,10 @@ def test_run_document_pipeline_scanned_pdf_falls_back_to_vision_and_succeeds(mon
 
     run = svc.run_document_pipeline(db, document, engagement)
 
-    assert run.steps[0].status == OrchestrationStepStatus.SUCCESS
-    assert "INV-SCAN-1" in run.steps[0].detail
+    assert run.steps[1].status == OrchestrationStepStatus.SUCCESS
+    assert "INV-SCAN-1" in run.steps[1].detail
     assert run.status == OrchestrationRunStatus.COMPLETED
-    assert run.steps[1].status == OrchestrationStepStatus.SUCCESS  # 1 evidence record now exists
+    assert run.steps[2].status == OrchestrationStepStatus.SUCCESS  # 1 evidence record now exists
     db.close()
 
 
@@ -151,9 +156,9 @@ def test_run_document_pipeline_scanned_pdf_vision_unavailable_fails(monkeypatch)
 
     run = svc.run_document_pipeline(db, document, engagement)
 
-    assert run.steps[0].status == OrchestrationStepStatus.FAILED
+    assert run.steps[1].status == OrchestrationStepStatus.FAILED
     assert run.status == OrchestrationRunStatus.FAILED
-    assert run.steps[1].status == OrchestrationStepStatus.SKIPPED
+    assert run.steps[2].status == OrchestrationStepStatus.SKIPPED
     db.close()
 
 
@@ -178,8 +183,8 @@ def test_run_document_pipeline_image_upload_uses_vision_directly_not_pdf_text(mo
 
     run = svc.run_document_pipeline(db, document, engagement)
 
-    assert run.steps[0].status == OrchestrationStepStatus.SUCCESS
-    assert "INV-PHOTO-1" in run.steps[0].detail
+    assert run.steps[1].status == OrchestrationStepStatus.SUCCESS
+    assert "INV-PHOTO-1" in run.steps[1].detail
     db.close()
 
 
@@ -238,6 +243,20 @@ def test_run_fraud_risk_step_reports_success_and_persists_flags():
     from app.models.models import FraudRiskFlag
     flags = db.query(FraudRiskFlag).filter(FraudRiskFlag.engagement_id == engagement.id).all()
     assert len(flags) == 2
+    db.close()
+
+
+def test_run_document_intake_step_tags_uncategorized_before_extraction():
+    db = SessionLocal()
+    engagement = make_engagement(db)
+    document = make_document(db, engagement)
+
+    outcome = svc.run_document_intake_step(db, document, engagement)
+
+    assert outcome.status == OrchestrationStepStatus.SUCCESS
+    assert "file_kind=pdf" in outcome.detail
+    db.refresh(document)
+    assert document.audit_area.value == "uncategorized"
     db.close()
 
 

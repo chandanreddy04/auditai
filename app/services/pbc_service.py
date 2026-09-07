@@ -32,7 +32,7 @@ class PBCLike:
     id: int
     item_name: str
     due_date: date | None
-    status: str  # "requested" / "received" / "waived"
+    status: str  # "requested" / "received" / "validated" / "follow_up" / "waived"
 
 
 @dataclass
@@ -53,6 +53,19 @@ def find_overdue(items: list[PBCLike], today: date) -> list[OverdueItem]:
         for item in items
         if is_overdue(item, today)
     ]
+
+
+def lifecycle_label(item: PBCLike, today: date) -> str:
+    """The blueprint names six stages (requested -> waiting -> received
+    -> validated -> missing -> follow-up); this app stores five states
+    and derives "waiting" / "missing" from status="requested" plus
+    is_overdue() - computed fresh every call, same reasoning as
+    is_overdue() itself already used (never stored, never drifts out of
+    date, no background job needed). Every other status is just its own
+    name - nothing to derive."""
+    if item.status == "requested":
+        return "missing" if is_overdue(item, today) else "waiting"
+    return item.status
 
 
 SYSTEM_PROMPT = (

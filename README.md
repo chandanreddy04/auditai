@@ -21,21 +21,21 @@ Phase 4: PBC / request tracking                                                 
 Phase 5: multi-agent orchestration across all of the above                                                [done]
 ```
 
-Beyond that original 5-phase roadmap, four more pieces have since been
+Beyond that original 5-phase roadmap, six more pieces have since been
 added: **real user accounts** (signup/login/logout) replacing the
 typed-name fields the five phases originally used for "who did this";
 **vision extraction** for scanned documents and photos; the
-**Anomaly / Fraud-Risk Detection engine**; and the **Audit Finding
-Assistant**, both below. A later, more detailed revision of the
-requirements document named 12 specific agents in total (not just the
-5 phases) - as of the finding assistant, **6 of those 12 are built**:
+**Anomaly / Fraud-Risk Detection engine**; the **Audit Finding
+Assistant**; a full **Document Intake Agent** (file-type classification
++ evidence-folder routing); and the **Audit Request / PBC Agent**'s
+full six-stage lifecycle, all below. A later, more detailed revision of
+the requirements document named 12 specific agents in total (not just
+the 5 phases) - **8 of those 12 are now built**: Document Intake,
 Evidence Extraction, Reconciliation, Controls Testing, Workpaper
-Drafting, Anomaly/Fraud-Risk Detection, and now Audit Finding
-Assistant. Two more are partially built (Document Intake and Audit
-Request/PBC tracking cover the basics but not the blueprint's full
-scope). The remaining four - Transaction Testing, Policy/Knowledge
-(RAG), Follow-up/Remediation, and Auditor Research Copilot - are not
-built yet.
+Drafting, Audit Request/PBC, Anomaly/Fraud-Risk Detection, and Audit
+Finding Assistant. The remaining four - Transaction Testing,
+Policy/Knowledge (RAG), Follow-up/Remediation, and Auditor Research
+Copilot - are not built yet.
 
 ## Why it's built this way
 
@@ -203,6 +203,48 @@ generating findings produced two well-grounded, non-hallucinated
 findings (correct risk ratings, no invented facts), regenerating
 created zero duplicates, and resolving one updated the queue and audit
 trail correctly.
+
+**Document Intake Agent.** The blueprint's own first stop, before
+evidence extraction even runs: "classifies incoming audit documents,
+identifies file types... and routes each document to the correct
+client, engagement, audit area, and evidence folder"
+([`document_intake_service.py`](app/services/document_intake_service.py)).
+Client/engagement routing already happened at upload time in every
+earlier phase; what this adds is the file-type check and an `audit_area`
+tag, now a real first orchestration step
+(`run_document_intake_step`) instead of an unlabeled implementation
+detail. 100% deterministic, zero LLM - a fixed lookup table, not a
+judgment call. Runs twice per document on purpose: once at intake
+(file type only - nothing else is known yet, so it starts
+`uncategorized`), and again right after extraction determines
+`doc_type`, which is when a real folder becomes possible. A new
+[`/engagements/{id}/evidence-folders`](app/web/templates/evidence_folders.html)
+page groups documents by that tag - the actual "evidence folder" view
+the blueprint names. Deliberately thin: every doc_type this app
+extracts today (purchase order, invoice, payment, bank statement) maps
+to one of two real folders (Vendor & Payments, Banking & Cash); a
+fuller taxonomy (payroll, inventory, journal entries) needs those
+evidence types to exist first - honest future scope, not a shortcut.
+
+**Audit Request / PBC Agent - full six-stage lifecycle.** The blueprint
+names six stages: requested → waiting → received → validated → missing
+→ follow-up. This app used to stop at three (requested/received/
+waived). Now: `received` is no longer treated as closed - it's an open
+item waiting on a human to **validate** it (confirm the evidence is
+actually adequate), a distinct, real action
+([`/pbc/{id}/validate`](app/web/routes.py)) that didn't exist before.
+A new **flag follow-up** action
+([`/pbc/{id}/flag-follow-up`](app/web/routes.py)) marks an item as
+needing an explicit chase - an inadequate response, or a missing item
+that needs escalating - distinct from a passive "still overdue."
+"Waiting" and "missing" are deliberately *not* new stored states -
+they're the same `requested` status, labeled by whether the due date
+has passed (see `pbc_service.lifecycle_label()`), the exact same
+"compute fresh, never store, never drifts out of date" choice this
+file already made for "overdue," now just renamed to match the
+blueprint's own vocabulary. `waived` stays as this app's own addition
+beyond the blueprint's six - a real, distinct outcome that doesn't fit
+any of them.
 
 ## Known limitations (found via live testing, not yet fixed)
 
@@ -379,15 +421,19 @@ pytest
 `test_fraud_risk_service.py`, `test_pbc_service.py`, and the
 summary-building half of `test_workpaper_service.py` cover five
 decision/summary engines with zero LLM calls — pure input/output,
-deterministic, fast. `test_finding_assistant_service.py` covers the
+deterministic, fast. `test_finding_assistant_service.py` covers a
 sixth (candidate-gathering and risk-rating rules with zero LLM calls;
-the one drafting call is exercised separately with the LLM mocked). `test_orchestration_service.py` covers the
-coordination logic itself (step ordering, skip-on-failure, run-status
-rollup) with the LLM-touching extraction call mocked. `test_api.py`
-exercises the full route flow (clients, engagements, uploads,
-exceptions, fraud-risk flags, controls, workpaper generate/edit/finalize,
-PBC requests/receive/waive/reminder, orchestration runs/manual
-full-check) end to end against a throwaway SQLite database.
+the one drafting call is exercised separately with the LLM mocked).
+`test_document_intake_service.py` covers the seventh - file-kind
+classification and the doc_type-to-audit_area lookup table, also zero
+LLM. `test_orchestration_service.py` covers the coordination logic
+itself (step ordering, skip-on-failure, run-status rollup) with the
+LLM-touching extraction call mocked. `test_api.py` exercises the full
+route flow (clients, engagements, uploads, exceptions, fraud-risk flags,
+findings, controls, workpaper generate/edit/finalize, evidence folders,
+PBC requests/receive/validate/flag-follow-up/waive/reminder,
+orchestration runs/manual full-check) end to end against a throwaway
+SQLite database.
 `test_evidence_extraction_service.py` and the drafting halves of
 `test_workpaper_service.py`/`test_pbc_service.py` cover LLM-touching
 code with the model call mocked.
@@ -418,7 +464,7 @@ tests alone would not have caught any of them.
 ```
 app/
   core/config.py                     settings, one seam for the environment
-  models/models.py                   User, Client, Engagement, Document, EvidenceRecord,
+  models/models.py                   User, Client, Engagement, Document, AuditArea, EvidenceRecord,
                                       ReconciliationException, Control, ControlTestResult,
                                       Workpaper, PBCRequest, FraudRiskFlag, AuditFinding,
                                       OrchestrationRun, OrchestrationStep, AuditLogEntry
@@ -428,14 +474,15 @@ app/
     auth_service.py                  password hashing (PBKDF2-HMAC-SHA256)
     llm_client.py                    Ollama/Groq switch (text + vision), the only LLM seam
     pdf_text_service.py              deterministic PDF text extraction + PDF-to-image render
+    document_intake_service.py       deterministic: file-kind check + doc_type-to-audit_area routing
     evidence_extraction_service.py   LLM (text or vision): document -> structured evidence
     reconciliation_service.py        deterministic: Phase 1's decision engine
     controls_testing_service.py      deterministic: Phase 2's decision engine
     fraud_risk_service.py            deterministic: pattern-based risk-flag engine, zero LLM
     finding_assistant_service.py     deterministic candidate/risk-rating logic + one batched LLM call
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
-    pbc_service.py                   deterministic overdue calc + Phase 4's one LLM call
-    orchestration_service.py         Phase 5: coordinates the agents above, logs every step
+    pbc_service.py                   deterministic overdue/waiting/missing calc + Phase 4's one LLM call
+    orchestration_service.py         Phase 5: coordinates the steps above, logs every one
     audit_log_service.py             one function, called after every action
   web/
     auth_routes.py                   signup/login/logout + get_current_user dependency
@@ -456,6 +503,8 @@ ten autonomous agents — start with one narrow, measurable workflow and
 make it reliable, secure, and explainable, then add capabilities in
 phases."* This repo is that recommendation, built one phase at a time -
 all five planned phases now complete, plus real authentication, vision
-extraction, the Anomaly/Fraud-Risk Detection engine, and the Audit
-Finding Assistant added as follow-ups, 135 tests passing, every
-feature verified live against a real model, not just against mocks.
+extraction, the Anomaly/Fraud-Risk Detection engine, the Audit Finding
+Assistant, a full Document Intake Agent, and the Audit Request/PBC
+Agent's complete six-stage lifecycle added as follow-ups, 143 tests
+passing, every feature verified live against a real model, not just
+against mocks.

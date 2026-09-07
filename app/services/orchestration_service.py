@@ -43,6 +43,7 @@ from app.models.models import (
 )
 from app.services import audit_log_service
 from app.services import controls_testing_service as controls_svc
+from app.services import document_intake_service
 from app.services import fraud_risk_service
 from app.services.evidence_extraction_service import extract_evidence, extract_evidence_from_image
 from app.services.llm_client import LLMUnavailableError
@@ -70,6 +71,27 @@ class StepOutcome:
 # step to re-run, not a whole document pipeline).
 
 _IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+def run_document_intake_step(db: Session, document: Document, engagement: Engagement) -> StepOutcome:
+    """Document Intake Agent, first step of the pipeline - see
+    document_intake_service.py's own docstring for the full reasoning.
+    Nothing about the document's actual content is known yet, so
+    audit_area starts UNCATEGORIZED here; run_evidence_extraction_step()
+    below refines it once doc_type is known. Always SUCCESS - a file
+    kind of "unknown" still gets tagged and logged, not treated as a
+    failure (evidence extraction is what decides whether the file is
+    actually readable, not intake)."""
+    file_kind = document_intake_service.classify_file_kind(document.filename)
+    document.audit_area = document_intake_service.route_to_audit_area(None)
+    db.commit()
+
+    detail = f"file_kind={file_kind}, routed to {engagement.client.name}/{engagement.name}, folder=uncategorized (pending extraction)"
+    audit_log_service.log(
+        db, actor="document_intake_step", action="document_intake", detail=detail,
+        engagement_id=engagement.id, client_id=engagement.client_id,
+    )
+    return StepOutcome(OrchestrationStepStatus.SUCCESS, detail)
 
 
 def run_evidence_extraction_step(db: Session, document: Document, engagement: Engagement) -> StepOutcome:
@@ -158,6 +180,7 @@ def _save_extracted_evidence(db: Session, document: Document, engagement: Engage
 
     document.doc_type = doc_type
     document.status = DocumentStatus.EXTRACTED
+    document.audit_area = document_intake_service.route_to_audit_area(doc_type)
     db.commit()
 
     record = EvidenceRecord(
@@ -344,10 +367,12 @@ def _skip_step(db: Session, run: OrchestrationRun, step_order: int, agent_name: 
 
 
 def run_document_pipeline(db: Session, document: Document, engagement: Engagement) -> OrchestrationRun:
-    """Triggered by an upload. Extraction always runs first; reconciliation,
-    fraud-risk detection, and controls testing only run if extraction
-    actually produced evidence - otherwise they're recorded as SKIPPED,
-    not silently absent from the run's history."""
+    """Triggered by an upload. Document intake always runs first (it
+    can't fail - see run_document_intake_step's own docstring), then
+    extraction; reconciliation, fraud-risk detection, and controls
+    testing only run if extraction actually produced evidence -
+    otherwise they're recorded as SKIPPED, not silently absent from the
+    run's history."""
     run = OrchestrationRun(
         engagement_id=engagement.id, client_id=engagement.client_id,
         trigger=OrchestrationTrigger.DOCUMENT_UPLOAD, triggered_by=document.filename,
@@ -356,17 +381,18 @@ def run_document_pipeline(db: Session, document: Document, engagement: Engagemen
     db.add(run)
     db.commit()
 
-    extraction_outcome = _execute_step(db, run, 1, "evidence_extraction_step", run_evidence_extraction_step, db, document, engagement)
+    _execute_step(db, run, 1, "document_intake_step", run_document_intake_step, db, document, engagement)
+    extraction_outcome = _execute_step(db, run, 2, "evidence_extraction_step", run_evidence_extraction_step, db, document, engagement)
 
     if extraction_outcome.status == OrchestrationStepStatus.SUCCESS:
-        recon_outcome = _execute_step(db, run, 2, "reconciliation_step", run_reconciliation_step, db, engagement)
-        fraud_outcome = _execute_step(db, run, 3, "fraud_risk_step", run_fraud_risk_step, db, engagement)
-        controls_outcome = _execute_step(db, run, 4, "controls_testing_step", run_controls_testing_step, db, engagement)
+        recon_outcome = _execute_step(db, run, 3, "reconciliation_step", run_reconciliation_step, db, engagement)
+        fraud_outcome = _execute_step(db, run, 4, "fraud_risk_step", run_fraud_risk_step, db, engagement)
+        controls_outcome = _execute_step(db, run, 5, "controls_testing_step", run_controls_testing_step, db, engagement)
         failed = OrchestrationStepStatus.FAILED in (recon_outcome.status, fraud_outcome.status, controls_outcome.status)
     else:
-        _skip_step(db, run, 2, "reconciliation_step", "Skipped - evidence extraction did not succeed.")
-        _skip_step(db, run, 3, "fraud_risk_step", "Skipped - evidence extraction did not succeed.")
-        _skip_step(db, run, 4, "controls_testing_step", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 3, "reconciliation_step", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 4, "fraud_risk_step", "Skipped - evidence extraction did not succeed.")
+        _skip_step(db, run, 5, "controls_testing_step", "Skipped - evidence extraction did not succeed.")
         failed = extraction_outcome.status == OrchestrationStepStatus.FAILED
 
     run.status = OrchestrationRunStatus.FAILED if failed else OrchestrationRunStatus.COMPLETED

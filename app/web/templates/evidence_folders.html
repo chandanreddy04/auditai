@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Evidence Folders - {{ engagement.name }}{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/">Clients</a> / <a href="/clients/{{ engagement.client_id }}">{{ engagement.client.name }}</a> / <a href="/engagements/{{ engagement.id }}">{{ engagement.name }}</a> / Evidence folders</p>
+<h1>Evidence folders</h1>
+<p class="subtle">
+    Every uploaded document, sorted by the Document Intake Agent into the folder its document type belongs to - a
+    plain, fixed lookup, never an AI judgment call. A document lands in "Uncategorized" until extraction determines
+    what it actually is, or if its type doesn't map to a known folder yet.
+</p>
+
+{% for area, docs in folders.items() %}
+<h2>{{ area.value.replace('_', ' ')|title }} ({{ docs|length }})</h2>
+<table class="list">
+    <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Uploaded</th></tr></thead>
+    <tbody>
+    {% for d in docs %}
+        <tr>
+            <td>{{ d.filename }}</td>
+            <td>{{ d.doc_type.value }}</td>
+            <td><span class="badge badge-{{ d.status.value }}">{{ d.status.value }}</span></td>
+            <td>{{ d.uploaded_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="4" class="empty">Nothing in this folder yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endfor %}
+{% endblock %}
