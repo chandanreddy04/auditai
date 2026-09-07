@@ -46,9 +46,37 @@ def _apply_column_retrofits() -> None:
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
 
 
+# A second, sharper version of the same gap, Postgres-only: SQLAlchemy's
+# Enum() column type creates a native Postgres ENUM TYPE (e.g. `pbcstatus`)
+# with a fixed, frozen set of allowed values at the time the table was
+# first created. Adding VALIDATED/FOLLOW_UP to PBCStatus in Python code
+# does nothing to that already-existing Postgres type - confirmed live:
+# every /pbc/{id}/validate call 500'd in production with an invalid-enum-
+# value error, while the identical code worked fine locally, because
+# SQLite has no native enum type (Enum() is just a plain column there
+# with no such gap). `ADD VALUE IF NOT EXISTS` is idempotent on its own
+# (PG 9.6+), so no inspection is needed first, unlike the column case
+# above. Run outside any transaction - ALTER TYPE ... ADD VALUE has real
+# restrictions inside a multi-statement transaction on some PG versions,
+# and there's no reason to risk it when autocommit is just as safe here.
+_RETROFIT_ENUM_VALUES = [
+    ("pbcstatus", "validated"),
+    ("pbcstatus", "follow_up"),
+]
+
+
+def _apply_enum_value_retrofits() -> None:
+    if engine.dialect.name != "postgresql":
+        return
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for type_name, value in _RETROFIT_ENUM_VALUES:
+            conn.execute(text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{value}'"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _apply_column_retrofits()
+    _apply_enum_value_retrofits()
 
 
 def get_db():

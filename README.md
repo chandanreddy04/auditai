@@ -246,6 +246,23 @@ blueprint's own vocabulary. `waived` stays as this app's own addition
 beyond the blueprint's six - a real, distinct outcome that doesn't fit
 any of them.
 
+**Two real schema-evolution bugs found and fixed live while building
+the above** ([`database/session.py`](app/database/session.py)):
+`Base.metadata.create_all()` only creates tables that don't exist yet -
+it never alters an already-existing table. Adding `Document.audit_area`
+broke every upload with a real `OperationalError` (confirmed against
+the local dev database) the moment the column existed in the model but
+not in the database. Sharper version of the same gap, Postgres-only:
+adding `VALIDATED`/`FOLLOW_UP` to `PBCStatus` did nothing to the native
+Postgres ENUM type `create_all()` had already created in production
+with the old, smaller set of values - confirmed live on the deployed
+site, every `/pbc/{id}/validate` call failed with a real 500 until
+fixed (SQLite has no native enum type, so this half only ever broke
+Postgres, never local dev - a real "worked on my machine" gap). Fixed
+both with a small, honest retrofit step run on every startup - no
+migration framework, just a short list of columns/enum values added if
+missing, since this project deliberately has no migration tooling.
+
 ## Known limitations (found via live testing, not yet fixed)
 
 - **Groq's free tier has a daily request quota (1,000/day), separate
