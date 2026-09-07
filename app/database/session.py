@@ -59,9 +59,19 @@ def _apply_column_retrofits() -> None:
 # above. Run outside any transaction - ALTER TYPE ... ADD VALUE has real
 # restrictions inside a multi-statement transaction on some PG versions,
 # and there's no reason to risk it when autocommit is just as safe here.
+#
+# Casing gotcha that broke the first attempt at this fix, found live:
+# SQLAlchemy's Enum(SomePythonEnum) stores the Python member's NAME
+# (e.g. "VALIDATED"), not its .value ("validated"), unless the column
+# was declared with values_callable - confirmed directly against this
+# app's own PBCRequest.status column (its `.enums` are all upper-case).
+# The values below MUST match that same upper-case convention, or
+# Postgres accepts the ALTER TYPE (a genuinely new label either way)
+# but SQLAlchemy's actual INSERT/UPDATE - which sends the upper-case
+# name - keeps failing against a still-missing label.
 _RETROFIT_ENUM_VALUES = [
-    ("pbcstatus", "validated"),
-    ("pbcstatus", "follow_up"),
+    ("pbcstatus", "VALIDATED"),
+    ("pbcstatus", "FOLLOW_UP"),
 ]
 
 

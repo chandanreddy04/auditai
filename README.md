@@ -258,9 +258,15 @@ Postgres ENUM type `create_all()` had already created in production
 with the old, smaller set of values - confirmed live on the deployed
 site, every `/pbc/{id}/validate` call failed with a real 500 until
 fixed (SQLite has no native enum type, so this half only ever broke
-Postgres, never local dev - a real "worked on my machine" gap). Fixed
-both with a small, honest retrofit step run on every startup - no
-migration framework, just a short list of columns/enum values added if
+Postgres, never local dev - a real "worked on my machine" gap). Took
+two tries to actually fix live: the first `ALTER TYPE ... ADD VALUE`
+used the lowercase `.value` strings ("validated") instead of the
+upper-case member *names* ("VALIDATED") SQLAlchemy's `Enum()` actually
+sends to Postgres by default - confirmed directly against this app's
+own column (`PBCRequest.status.type.enums` is all upper-case) after
+the first fix still 500'd live. Fixed both with a small, honest
+retrofit step run on every startup - no migration framework, just a
+short list of columns/enum values added if
 missing, since this project deliberately has no migration tooling.
 
 ## Known limitations (found via live testing, not yet fixed)

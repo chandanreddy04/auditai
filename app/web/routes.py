@@ -838,15 +838,3 @@ def audit_log(
         .all()
     )
     return templates.TemplateResponse("audit_log.html", {"request": request, "engagement": engagement, "entries": entries, "current_user": current_user})
-
-
-@router.get("/_debug/enum-check")
-def _debug_enum_check(db: Session = Depends(get_db)):
-    """Temporary - diagnosing a live-only Postgres enum retrofit issue.
-    Remove once resolved."""
-    from sqlalchemy import text as _text
-    try:
-        result = db.execute(_text("SELECT enum_range(NULL::pbcstatus)")).scalar()
-        return {"pbcstatus_values": result}
-    except Exception as e:
-        return {"error": str(e)}
