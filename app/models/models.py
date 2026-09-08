@@ -397,7 +397,11 @@ class AuditFinding(Base):
     writes up prose for something already flagged. risk_rating is set by
     plain code, not the model - see that file's own docstring for why.
     Same open/resolved/dismissed review-queue discipline as every other
-    flag in this app: only a named human closes one."""
+    flag in this app: only a named human closes one. owner/target_date
+    are the blueprint's own Follow-up/Remediation fields ("Issue owner,
+    Target date, Status, Remediation evidence, Closure review") - see
+    remediation_service.py for the overdue computation and reminder
+    drafting built on top of them."""
     __tablename__ = "audit_findings"
 
     id = Column(Integer, primary_key=True)
@@ -410,6 +414,8 @@ class AuditFinding(Base):
     root_cause = Column(Text, nullable=False)
     impact = Column(Text, nullable=False)
     recommendation = Column(Text, nullable=False)
+    owner = Column(String(200), nullable=True)
+    target_date = Column(Date, nullable=True)
     status = Column(Enum(ExceptionStatus), default=ExceptionStatus.OPEN)
     resolved_by = Column(String(200), nullable=True)
     resolution_note = Column(Text, nullable=True)

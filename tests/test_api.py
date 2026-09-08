@@ -381,6 +381,93 @@ def test_finding_assistant_flow(monkeypatch):
     assert "Obtained the missing PO." in resp.text
 
 
+def test_remediation_flow(monkeypatch):
+    from datetime import date, timedelta
+
+    from app.database.session import SessionLocal
+    from app.models.models import AuditFinding, Client, Engagement, ExceptionStatus, FindingRiskRating, FindingSourceType
+    from app.web import routes as routes_module
+
+    monkeypatch.setattr(
+        routes_module.remediation_service, "draft_remediation_reminder",
+        lambda client_name, engagement_name, overdue: "Please provide a remediation update on the items below.",
+    )
+
+    client.post("/clients", data={"name": "Remediation Test Corp"}, follow_redirects=False)
+    db = SessionLocal()
+    acme = db.query(Client).filter(Client.name == "Remediation Test Corp").first()
+    db.close()
+
+    client.post(
+        f"/clients/{acme.id}/engagements",
+        data={"name": "Remediation Engagement", "audit_type": "financial"},
+        follow_redirects=False,
+    )
+    db = SessionLocal()
+    engagement = db.query(Engagement).filter(Engagement.client_id == acme.id).first()
+    db.close()
+
+    # Seed two findings directly (bypassing the Finding Assistant's own LLM call).
+    db = SessionLocal()
+    overdue_finding = AuditFinding(
+        engagement_id=engagement.id, client_id=acme.id, source_type=FindingSourceType.RECONCILIATION_EXCEPTION,
+        source_id=1, title="Missing PO for high-value invoice", risk_rating=FindingRiskRating.HIGH,
+        root_cause="r", impact="i", recommendation="rec",
+    )
+    future_finding = AuditFinding(
+        engagement_id=engagement.id, client_id=acme.id, source_type=FindingSourceType.CONTROL_FAILURE,
+        source_id=2, title="Segregation of duties gap", risk_rating=FindingRiskRating.MEDIUM,
+        root_cause="r", impact="i", recommendation="rec",
+    )
+    db.add_all([overdue_finding, future_finding])
+    db.commit()
+    overdue_id, future_id = overdue_finding.id, future_finding.id
+    db.close()
+
+    # No owner/target date yet -> not overdue, no reminder button.
+    resp = client.get(f"/engagements/{engagement.id}/findings")
+    assert "unassigned" in resp.text
+    assert "remediation overdue" not in resp.text
+    assert "Draft remediation reminder" not in resp.text
+
+    past_date = (date.today() - timedelta(days=10)).isoformat()
+    future_date = (date.today() + timedelta(days=10)).isoformat()
+
+    resp = client.post(f"/findings/{overdue_id}/assign", data={"owner": "Jane Smith", "target_date": past_date}, follow_redirects=False)
+    assert resp.status_code == 303
+    resp = client.post(f"/findings/{future_id}/assign", data={"owner": "Tom Lee", "target_date": future_date}, follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = client.get(f"/engagements/{engagement.id}/findings")
+    assert "Jane Smith" in resp.text
+    assert "remediation overdue" in resp.text
+    assert "Draft remediation reminder" in resp.text
+
+    # Draft a reminder (LLM mocked) - rendered directly, not persisted.
+    resp = client.post(f"/engagements/{engagement.id}/findings/draft-reminder")
+    assert resp.status_code == 200
+    assert "Please provide a remediation update" in resp.text
+
+    # Resolving the overdue one clears its overdue badge.
+    resp = client.post(
+        f"/findings/{overdue_id}/resolve",
+        data={"resolution_note": "PO obtained retroactively.", "action": "resolved"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    db = SessionLocal()
+    db.expire_all()
+    resolved = db.get(AuditFinding, overdue_id)
+    db.close()
+    assert resolved.status == ExceptionStatus.RESOLVED
+    assert resolved.owner == "Jane Smith"  # assignment survives resolution, for the record
+
+    resp = client.get(f"/engagements/{engagement.id}/findings")
+    assert "remediation overdue" not in resp.text  # the only overdue one is now closed
+    assert "Draft remediation reminder" not in resp.text
+
+
 def test_pbc_flow(monkeypatch):
     from datetime import date, timedelta
 

@@ -37,6 +37,7 @@ from app.services import audit_log_service
 from app.services import finding_assistant_service
 from app.services import orchestration_service
 from app.services import pbc_service
+from app.services import remediation_service
 from app.services import workpaper_service
 from app.services.llm_client import LLMUnavailableError
 from app.web.auth_routes import get_current_user
@@ -305,6 +306,8 @@ def resolve_fraud_risk_flag(
 def findings_page(
     request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
+    from datetime import date
+
     engagement = _get_engagement_or_404(db, engagement_id)
     open_findings = (
         db.query(AuditFinding)
@@ -319,11 +322,20 @@ def findings_page(
         .limit(20)
         .all()
     )
+
+    today = date.today()
+    finding_like = [
+        remediation_service.FindingLike(id=f.id, title=f.title, owner=f.owner, target_date=f.target_date, status=f.status.value)
+        for f in open_findings
+    ]
+    overdue_ids = {o.id for o in remediation_service.find_overdue(finding_like, today)}
+
     return templates.TemplateResponse(
         "findings.html",
         {
             "request": request, "engagement": engagement, "open_findings": open_findings,
-            "closed_findings": closed_findings, "current_user": current_user,
+            "closed_findings": closed_findings, "overdue_ids": overdue_ids,
+            "has_overdue": bool(overdue_ids), "reminder_draft": None, "current_user": current_user,
         },
     )
 
@@ -402,6 +414,86 @@ def resolve_finding(
         engagement_id=finding.engagement_id, client_id=finding.client_id,
     )
     return RedirectResponse(url=f"/engagements/{finding.engagement_id}/findings", status_code=303)
+
+
+@router.post("/findings/{finding_id}/assign")
+def assign_finding(
+    finding_id: int, owner: str = Form(...), target_date: str = Form(""),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    """Follow-up/Remediation Agent, the human half: putting a finding on
+    a timeline. Deliberately a separate action from resolving one - a
+    finding can be assigned an owner and a deadline long before anyone
+    has actually fixed it."""
+    from datetime import date as date_cls
+
+    finding = db.get(AuditFinding, finding_id)
+    if finding is None:
+        raise HTTPException(404, "Finding not found")
+
+    finding.owner = owner.strip()
+    finding.target_date = date_cls.fromisoformat(target_date) if target_date.strip() else None
+    db.commit()
+
+    audit_log_service.log(
+        db, actor=current_user.name, action="finding_assigned",
+        detail=f"#{finding.id}: owner={finding.owner}, target={target_date or 'no date set'}",
+        engagement_id=finding.engagement_id, client_id=finding.client_id,
+    )
+    return RedirectResponse(url=f"/engagements/{finding.engagement_id}/findings", status_code=303)
+
+
+@router.post("/engagements/{engagement_id}/findings/draft-reminder")
+def draft_findings_reminder(
+    request: Request, engagement_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    """Same non-persisted, render-directly pattern as PBC's reminder
+    draft (see draft_pbc_reminder) - a one-off convenience the auditor
+    copies into their own email client, never sent by this app."""
+    from datetime import date
+
+    engagement = _get_engagement_or_404(db, engagement_id)
+    open_findings = (
+        db.query(AuditFinding)
+        .filter(AuditFinding.engagement_id == engagement_id, AuditFinding.status == ExceptionStatus.OPEN)
+        .order_by(AuditFinding.risk_rating.desc(), AuditFinding.created_at)
+        .all()
+    )
+    closed_findings = (
+        db.query(AuditFinding)
+        .filter(AuditFinding.engagement_id == engagement_id, AuditFinding.status != ExceptionStatus.OPEN)
+        .order_by(AuditFinding.resolved_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    today = date.today()
+    finding_like = [
+        remediation_service.FindingLike(id=f.id, title=f.title, owner=f.owner, target_date=f.target_date, status=f.status.value)
+        for f in open_findings
+    ]
+    overdue = remediation_service.find_overdue(finding_like, today)
+
+    reminder_draft = None
+    if overdue:
+        try:
+            reminder_draft = remediation_service.draft_remediation_reminder(engagement.client.name, engagement.name, overdue)
+            audit_log_service.log(
+                db, actor="remediation_service", action="remediation_reminder_drafted", detail=f"{len(overdue)} overdue findings",
+                engagement_id=engagement_id, client_id=engagement.client_id,
+            )
+        except LLMUnavailableError as e:
+            reminder_draft = f"(AI drafting unavailable: {e})"
+
+    overdue_ids = {o.id for o in overdue}
+    return templates.TemplateResponse(
+        "findings.html",
+        {
+            "request": request, "engagement": engagement, "open_findings": open_findings,
+            "closed_findings": closed_findings, "overdue_ids": overdue_ids,
+            "has_overdue": bool(overdue_ids), "reminder_draft": reminder_draft, "current_user": current_user,
+        },
+    )
 
 
 # ----------------------------------------------------------------- controls

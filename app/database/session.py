@@ -30,6 +30,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # ddl) entry here any time a future column faces the same gap.
 _RETROFIT_COLUMNS = [
     ("documents", "audit_area", "VARCHAR(20) DEFAULT 'uncategorized'"),
+    ("audit_findings", "owner", "VARCHAR(200)"),
+    ("audit_findings", "target_date", "DATE"),
 ]
 
 

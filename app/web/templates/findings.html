@@ -7,7 +7,8 @@
     Every finding here started as something a deterministic engine already flagged - a reconciliation exception, a
     failed control test, or a fraud-risk flag. AI only writes up the root cause / impact / recommendation prose from
     those already-decided facts; the risk rating is assigned by plain code, never the model. Only a human resolves or
-    dismisses one.
+    dismisses one. Once a finding is open, assign it an owner and a target date to track it through to remediation -
+    "overdue" is computed live from that date, never stored, the same discipline as PBC tracking.
 </p>
 
 <form method="post" action="/engagements/{{ engagement.id }}/findings/generate" class="inline-form">
@@ -15,17 +16,35 @@
     <span class="subtle small">Drafts findings for any exception, control failure, or fraud flag not yet written up - safe to click again, already-drafted items are never duplicated.</span>
 </form>
 
+{% if reminder_draft %}
+<div class="exception-card severity-medium">
+    <div class="exception-head"><span class="badge">AI-drafted remediation reminder</span></div>
+    <p style="white-space: pre-wrap;">{{ reminder_draft }}</p>
+    <p class="subtle small">Drafted from the overdue findings below only - copy, review, and send it yourself. This app never sends mail on your behalf.</p>
+</div>
+{% endif %}
+
 <h2>Open ({{ open_findings|length }})</h2>
 {% for finding in open_findings %}
 <div class="exception-card severity-{{ finding.risk_rating.value }}">
     <div class="exception-head">
         <span class="badge">{{ finding.source_type.value }}</span>
         <span class="badge severity-badge">{{ finding.risk_rating.value }} risk</span>
+        {% if finding.id in overdue_ids %}<span class="badge badge-failed">remediation overdue</span>{% endif %}
     </div>
     <h3 style="margin: 4px 0;">{{ finding.title }}</h3>
     <p><strong>Root cause:</strong> {{ finding.root_cause }}</p>
     <p><strong>Impact:</strong> {{ finding.impact }}</p>
     <p><strong>Recommendation:</strong> {{ finding.recommendation }}</p>
+    <p class="subtle small">
+        Owner: {{ finding.owner or "unassigned" }}
+        &middot; Target date: {{ finding.target_date.strftime("%Y-%m-%d") if finding.target_date else "not set" }}
+    </p>
+    <form method="post" action="/findings/{{ finding.id }}/assign" class="inline-form">
+        <input type="text" name="owner" placeholder="Owner (who's fixing this?)" value="{{ finding.owner or '' }}" required>
+        <input type="date" name="target_date" value="{{ finding.target_date.isoformat() if finding.target_date else '' }}">
+        <button type="submit" class="secondary">Assign</button>
+    </form>
     <form method="post" action="/findings/{{ finding.id }}/resolve" class="inline-form">
         <input type="text" name="resolution_note" placeholder="Resolution note (what was done?)">
         <button type="submit" name="action" value="resolved">Resolve</button>
@@ -36,19 +55,26 @@
 <p class="empty">No open findings - nothing written up yet, or everything's been resolved.</p>
 {% endfor %}
 
+{% if has_overdue %}
+<form method="post" action="/engagements/{{ engagement.id }}/findings/draft-reminder">
+    <button type="submit">Draft remediation reminder for overdue findings</button>
+</form>
+{% endif %}
+
 <h2>Recently closed</h2>
 <table class="list">
-    <thead><tr><th>Title</th><th>Risk</th><th>Closed by</th><th>Note</th></tr></thead>
+    <thead><tr><th>Title</th><th>Risk</th><th>Owner</th><th>Closed by</th><th>Note</th></tr></thead>
     <tbody>
     {% for finding in closed_findings %}
         <tr>
             <td>{{ finding.title }} <span class="subtle small">{{ finding.status.value }}</span></td>
             <td>{{ finding.risk_rating.value }}</td>
+            <td>{{ finding.owner or "" }}</td>
             <td>{{ finding.resolved_by }}</td>
             <td>{{ finding.resolution_note }}</td>
         </tr>
     {% else %}
-        <tr><td colspan="4" class="empty">Nothing closed yet.</td></tr>
+        <tr><td colspan="5" class="empty">Nothing closed yet.</td></tr>
     {% endfor %}
     </tbody>
 </table>
