@@ -21,21 +21,22 @@ Phase 4: PBC / request tracking                                                 
 Phase 5: multi-agent orchestration across all of the above                                                [done]
 ```
 
-Beyond that original 5-phase roadmap, six more pieces have since been
+Beyond that original 5-phase roadmap, seven more pieces have since been
 added: **real user accounts** (signup/login/logout) replacing the
 typed-name fields the five phases originally used for "who did this";
 **vision extraction** for scanned documents and photos; the
 **Anomaly / Fraud-Risk Detection engine**; the **Audit Finding
 Assistant**; a full **Document Intake Agent** (file-type classification
-+ evidence-folder routing); and the **Audit Request / PBC Agent**'s
-full six-stage lifecycle, all below. A later, more detailed revision of
-the requirements document named 12 specific agents in total (not just
-the 5 phases) - **8 of those 12 are now built**: Document Intake,
-Evidence Extraction, Reconciliation, Controls Testing, Workpaper
-Drafting, Audit Request/PBC, Anomaly/Fraud-Risk Detection, and Audit
-Finding Assistant. The remaining four - Transaction Testing,
-Policy/Knowledge (RAG), Follow-up/Remediation, and Auditor Research
-Copilot - are not built yet.
++ evidence-folder routing); the **Audit Request / PBC Agent**'s full
+six-stage lifecycle; and the **Follow-up / Remediation Agent**, all
+below. A later, more detailed revision of the requirements document
+named 12 specific agents in total (not just the 5 phases) - **9 of
+those 12 are now built**: Document Intake, Evidence Extraction,
+Reconciliation, Controls Testing, Workpaper Drafting, Audit
+Request/PBC, Anomaly/Fraud-Risk Detection, Audit Finding Assistant, and
+Follow-up/Remediation. The remaining three - Transaction Testing,
+Policy/Knowledge (RAG), and Auditor Research Copilot - are not built
+yet.
 
 ## Why it's built this way
 
@@ -269,6 +270,34 @@ retrofit step run on every startup - no migration framework, just a
 short list of columns/enum values added if
 missing, since this project deliberately has no migration tooling.
 
+**Follow-up / Remediation Agent.** The blueprint's own 15th workflow
+stage: after a finding is written up, track whether it actually gets
+fixed. Deliberately not a new record type - it operates on the
+`AuditFinding` rows the Finding Assistant already produces, reusing
+the exact overdue-computation + reminder-drafting pattern PBC tracking
+already proved out, just pointed at a different kind of record. Two
+new fields, the blueprint's own vocabulary (`owner`, `target_date`),
+set only via a named human action
+([`/findings/{id}/assign`](app/web/routes.py)) - never inferred or
+auto-assigned. "Overdue" is computed fresh every time from
+`target_date` vs. today, never stored - same discipline as every other
+overdue calculation in this app. One deliberate design choice worth
+calling out: a finding with a target date but no owner assigned is
+still counted overdue - a missed deadline doesn't stop being missed
+just because nobody was named responsible for it; only a missing
+target date exempts a finding from being overdue at all. The one LLM
+call ([`remediation_service.py`](app/services/remediation_service.py))
+drafts a reminder from the already-computed overdue list only, never
+sent automatically - same "the auditor copies it into their own email
+client" rule as PBC's reminder. Verified live: generated two real
+findings from a real invoice missing a required PO, assigned one an
+overdue target date and one a future date, confirmed only the overdue
+one showed the "remediation overdue" badge and enabled the reminder
+button, drafted a real reminder (correctly named only the overdue
+finding's owner, with an accurate day-count), then resolved it and
+confirmed the badge/button both disappeared while the owner assignment
+stayed visible on the closed record.
+
 ## Known limitations (found via live testing, not yet fixed)
 
 - **Groq's free tier has a daily request quota (1,000/day), separate
@@ -449,17 +478,24 @@ sixth (candidate-gathering and risk-rating rules with zero LLM calls;
 the one drafting call is exercised separately with the LLM mocked).
 `test_document_intake_service.py` covers the seventh - file-kind
 classification and the doc_type-to-audit_area lookup table, also zero
-LLM. `test_orchestration_service.py` covers the coordination logic
-itself (step ordering, skip-on-failure, run-status rollup) with the
-LLM-touching extraction call mocked. `test_api.py` exercises the full
-route flow (clients, engagements, uploads, exceptions, fraud-risk flags,
-findings, controls, workpaper generate/edit/finalize, evidence folders,
-PBC requests/receive/validate/flag-follow-up/waive/reminder,
+LLM. `test_remediation_service.py` covers the eighth - overdue
+computation over findings (deliberately including the "target date but
+no owner is still overdue" edge case), also zero LLM; the one
+drafting call is exercised separately with the LLM mocked, same as
+`test_pbc_service.py`'s reminder test. `test_orchestration_service.py`
+covers the coordination logic itself (step ordering, skip-on-failure,
+run-status rollup) with the LLM-touching extraction call mocked.
+`test_api.py` exercises the full route flow (clients, engagements,
+uploads, exceptions, fraud-risk flags, findings, controls, workpaper
+generate/edit/finalize, evidence folders,
+PBC requests/receive/validate/flag-follow-up/waive/reminder, finding
+assign/resolve/dismiss/remediation-reminder,
 orchestration runs/manual full-check) end to end against a throwaway
 SQLite database.
 `test_evidence_extraction_service.py` and the drafting halves of
-`test_workpaper_service.py`/`test_pbc_service.py` cover LLM-touching
-code with the model call mocked.
+`test_workpaper_service.py`/`test_pbc_service.py`/
+`test_remediation_service.py` cover LLM-touching code with the model
+call mocked.
 
 `test_auth_service.py` covers password hashing (zero LLM, zero HTTP).
 `test_auth_routes.py` covers signup/login/logout and the
@@ -505,6 +541,7 @@ app/
     finding_assistant_service.py     deterministic candidate/risk-rating logic + one batched LLM call
     workpaper_service.py             deterministic summary builder + Phase 3's one LLM call
     pbc_service.py                   deterministic overdue/waiting/missing calc + Phase 4's one LLM call
+    remediation_service.py           deterministic overdue calc + one LLM call, same pattern pointed at findings
     orchestration_service.py         Phase 5: coordinates the steps above, logs every one
     audit_log_service.py             one function, called after every action
   web/
@@ -527,7 +564,7 @@ make it reliable, secure, and explainable, then add capabilities in
 phases."* This repo is that recommendation, built one phase at a time -
 all five planned phases now complete, plus real authentication, vision
 extraction, the Anomaly/Fraud-Risk Detection engine, the Audit Finding
-Assistant, a full Document Intake Agent, and the Audit Request/PBC
-Agent's complete six-stage lifecycle added as follow-ups, 143 tests
-passing, every feature verified live against a real model, not just
-against mocks.
+Assistant, a full Document Intake Agent, the Audit Request/PBC Agent's
+complete six-stage lifecycle, and the Follow-up/Remediation Agent
+added as follow-ups, 158 tests passing, every feature verified live
+against a real model, not just against mocks.
